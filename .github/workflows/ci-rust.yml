@@ -1,0 +1,32 @@
+name: ci-rust
+
+on:
+  workflow_call:
+    inputs:
+      run-e2e:
+        type: boolean
+        default: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint and test
+        run: make lint test
+
+      - name: E2E gate
+        if: ${{ inputs.run-e2e }}
+        run: |
+          if grep -qE '^e2e:' Makefile 2>/dev/null; then
+            make e2e
+          else
+            echo "no e2e target — skipping"
+          fi

@@ -1,0 +1,42 @@
+name: ci-node
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: '22'
+      run-e2e:
+        type: boolean
+        default: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Lint and test
+        run: make lint test
+
+      - name: E2E gate
+        if: ${{ inputs.run-e2e }}
+        run: |
+          if grep -qE '^e2e:' Makefile 2>/dev/null; then
+            make e2e
+          else
+            echo "no e2e target — skipping"
+          fi
