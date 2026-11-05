@@ -134,14 +134,9 @@ jobs:
             exit 1
           fi
 
-      # The readable tree is exactly prompt.md plus the bundle: the tool is
-      # checked out, the two files it needs are kept, and the checkout
-      # (with its .git) is removed. The pull request is never checked out.
-      # With no git repository in the workspace or above it, the action's
-      # configureGitAuth, which runs `git remote set-url origin
-      # https://x-access-token:<token>@...` in the working directory
-      # (src/github/operations/git-config.ts at the pinned commit), has
-      # nowhere to write the token and fails harmlessly.
+      # The readable tree is prompt.md, the bundle, and the empty git
+      # repository the action needs (model-workspace.sh). The tool checkout
+      # is removed again and the pull request is never checked out.
       - name: Check out dep-pr-review itself
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -156,6 +151,7 @@ jobs:
           set -euo pipefail
           cp tool/scripts/dep-pr-review/prompt.md prompt.md
           cp tool/scripts/dep-pr-review/verify-bundle.sh "$RUNNER_TEMP/verify-bundle.sh"
+          cp tool/scripts/dep-pr-review/model-workspace.sh "$RUNNER_TEMP/model-workspace.sh"
           rm -rf tool
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -163,14 +159,20 @@ jobs:
           name: ${{ inputs.name }}-bundle
           path: bundle
 
-      - name: Check the bundle is complete and the workspace holds nothing else
+      - name: Check the bundle is complete, then prepare the model workspace
+        env:
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/verify-bundle.sh" bundle
-          extra=$(find . -mindepth 1 -maxdepth 1 ! -name prompt.md ! -name bundle)
-          repo=$(find . -name .git -print -quit)
-          if [ -n "$extra" ] || [ -n "$repo" ] || git rev-parse --git-dir > /dev/null 2>&1; then
-            echo "::error::the model workspace must hold only prompt.md and bundle/, with no git repository: ${extra}${repo}"
+          if [ -n "$(find bundle -name .git -print -quit)" ]; then
+            echo "::error::the bundle contains a .git directory"
+            exit 1
+          fi
+          "$RUNNER_TEMP/model-workspace.sh" "$REPO"
+          extra=$(find . -mindepth 1 -maxdepth 1 ! -name prompt.md ! -name bundle ! -name .git)
+          if [ -n "$extra" ] || [ -n "$(git ls-files)" ]; then
+            echo "::error::the model workspace must hold only prompt.md, bundle/ and an empty repository: $extra"
             exit 1
           fi
 
@@ -190,7 +192,11 @@ jobs:
       #                              directories, where tokens live, are out
       #                              of reach;
       #   --setting-sources user      loads only the settings this step
-      #                              writes, never a project .claude.
+      #                              writes, never a project .claude;
+      #   Read(./.git/**) denied      keeps the remote URL, where the action
+      #                              puts this job's read-only GITHUB_TOKEN,
+      #                              out of reach; the verdict is also
+      #                              rejected if it contains that token.
       # The settings input is written to ~/.claude/settings.json
       # (base-action/src/setup-claude-code-settings.ts at this commit).
       - id: review
@@ -204,7 +210,7 @@ jobs:
           # actor.ts at this commit). Only Renovate.
           allowed_bots: renovate
           display_report: false
-          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Bash","Edit","Write","WebFetch","WebSearch"]}}'
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Bash","Edit","Write","WebFetch","WebSearch","Read(./.git/**)","Read(./.git)"]}}'
           prompt: |
             Follow prompt.md exactly. The bundle to review is in bundle/.
           claude_args: |
@@ -215,25 +221,19 @@ jobs:
             --setting-sources user
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["sane","not_sane"]},"reasons":{"type":"array","items":{"type":"string"},"minItems":1},"findings":{"type":"array","items":{"type":"object","properties":{"dependency":{"type":"string"},"category":{"type":"string","enum":["network","secrets","install-script","obfuscation","notes-mismatch","provenance","other"]},"severity":{"type":"string","enum":["high","medium","low"]},"detail":{"type":"string"}},"required":["dependency","category","severity","detail"],"additionalProperties":false}}},"required":["verdict","reasons","findings"],"additionalProperties":false}'
 
-      # Where the action could have put a credential (a git remote in the
-      # working directory): still no repository there.
-      - name: No credential reached the readable tree
-        if: always() && steps.review.outcome != 'skipped'
-        run: |
-          set -euo pipefail
-          if git rev-parse --git-dir > /dev/null 2>&1; then
-            echo "::error::a git repository appeared in the model workspace"
-            exit 1
-          fi
-
       # The action does not enforce the schema, so the full contract is
       # checked here; anything else is no verdict at all.
       - name: Validate the verdict
         env:
           RESULT: ${{ steps.review.outputs.structured_output }}
+          TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           printf '%s' "$RESULT" > verdict.json
+          if grep -qF "$TOKEN" verdict.json; then
+            echo "::error::the verdict contains this job's token; discarded"
+            exit 1
+          fi
           jq -e '
             (keys == ["findings", "reasons", "verdict"])
             and (.verdict | IN("sane", "not_sane"))

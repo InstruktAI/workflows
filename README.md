@@ -190,8 +190,12 @@ and npm package gets two answers:
   scripts, and encoded or obfuscated blobs are flagged to it by pattern.
 
 The model runs in its own job with a read-only token and no pull-request
-checkout. Its working directory holds only `prompt.md` and the bundle, with
-no git repository in which the action could store its token. `--tools
+checkout. Its working directory holds only `prompt.md`, the bundle and an
+empty git repository, which the action requires (it fetches the base branch
+on pull requests); the action stores this job's read-only `GITHUB_TOKEN` in
+that repository's remote, so reads under `.git/` are denied, a verdict that
+contains the token is discarded, and the token expires when the job ends,
+before anything is posted. `--tools
 "Read,Glob,Grep"` leaves it no other built-in tool, `--disallowedTools
 "mcp__*"` no MCP tool, and the `blockReadsOutsideWorkingDirectories` setting
 makes its file tools refuse anything outside that directory, such as
