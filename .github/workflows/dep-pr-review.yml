@@ -134,30 +134,65 @@ jobs:
             exit 1
           fi
 
-      # The workspace is this tool at the workflow's own commit plus the
-      # bundle; the pull request is never checked out here.
+      # The readable tree is exactly prompt.md plus the bundle: the tool is
+      # checked out, the two files it needs are kept, and the checkout
+      # (with its .git) is removed. The pull request is never checked out.
+      # With no git repository in the workspace or above it, the action's
+      # configureGitAuth, which runs `git remote set-url origin
+      # https://x-access-token:<token>@...` in the working directory
+      # (src/github/operations/git-config.ts at the pinned commit), has
+      # nowhere to write the token and fails harmlessly.
       - name: Check out dep-pr-review itself
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           sparse-checkout: scripts/dep-pr-review
+          path: tool
           persist-credentials: false
+
+      - name: Keep only the prompt and the bundle checker
+        run: |
+          set -euo pipefail
+          cp tool/scripts/dep-pr-review/prompt.md prompt.md
+          cp tool/scripts/dep-pr-review/verify-bundle.sh "$RUNNER_TEMP/verify-bundle.sh"
+          rm -rf tool
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.name }}-bundle
           path: bundle
 
-      - name: Check the bundle is complete
-        run: scripts/dep-pr-review/verify-bundle.sh bundle
+      - name: Check the bundle is complete and the workspace holds nothing else
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/verify-bundle.sh" bundle
+          extra=$(find . -mindepth 1 -maxdepth 1 ! -name prompt.md ! -name bundle)
+          repo=$(find . -name .git -print -quit)
+          if [ -n "$extra" ] || [ -n "$repo" ] || git rev-parse --git-dir > /dev/null 2>&1; then
+            echo "::error::the model workspace must hold only prompt.md and bundle/, with no git repository: ${extra}${repo}"
+            exit 1
+          fi
 
       # Pinned the way InstruktAI/logging's release inspector pins it
       # (.github/workflows/auto-release.yml). In agent mode (a `prompt`
-      # input) the action posts no tracking comment; actors ending in [bot]
-      # such as renovate[bot] pass its permission check
-      # (src/modes/detector.ts, src/github/validation/permissions.ts at this
-      # commit). Only Read, Glob and Grep are allowed: no shell, no network.
+      # input) the action posts no tracking comment.
+      #
+      # The boundary, all from the Claude Code CLI and settings references:
+      #   --tools "Read,Glob,Grep"   restricts the built-in tools that exist
+      #                              at all (not just which run unprompted);
+      #   --disallowedTools "mcp__*" removes every MCP tool, which --tools
+      #                              does not cover;
+      #   blockReadsOutsideWorkingDirectories makes the file tools refuse
+      #                              reads outside the working directory (the
+      #                              workspace) in every permission mode, so
+      #                              /proc, $HOME and the runner's temp
+      #                              directories, where tokens live, are out
+      #                              of reach;
+      #   --setting-sources user      loads only the settings this step
+      #                              writes, never a project .claude.
+      # The settings input is written to ~/.claude/settings.json
+      # (base-action/src/setup-claude-code-settings.ts at this commit).
       - id: review
         name: Review the code changes
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
@@ -169,13 +204,27 @@ jobs:
           # actor.ts at this commit). Only Renovate.
           allowed_bots: renovate
           display_report: false
+          settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Bash","Edit","Write","WebFetch","WebSearch"]}}'
           prompt: |
-            Follow scripts/dep-pr-review/prompt.md exactly. The bundle to review is in bundle/.
+            Follow prompt.md exactly. The bundle to review is in bundle/.
           claude_args: |
             --max-turns 60
+            --tools "Read,Glob,Grep"
             --allowedTools "Read,Glob,Grep"
-            --disallowedTools "Bash,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"
+            --disallowedTools "mcp__*"
+            --setting-sources user
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["sane","not_sane"]},"reasons":{"type":"array","items":{"type":"string"},"minItems":1},"findings":{"type":"array","items":{"type":"object","properties":{"dependency":{"type":"string"},"category":{"type":"string","enum":["network","secrets","install-script","obfuscation","notes-mismatch","provenance","other"]},"severity":{"type":"string","enum":["high","medium","low"]},"detail":{"type":"string"}},"required":["dependency","category","severity","detail"],"additionalProperties":false}}},"required":["verdict","reasons","findings"],"additionalProperties":false}'
+
+      # Where the action could have put a credential (a git remote in the
+      # working directory): still no repository there.
+      - name: No credential reached the readable tree
+        if: always() && steps.review.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          if git rev-parse --git-dir > /dev/null 2>&1; then
+            echo "::error::a git repository appeared in the model workspace"
+            exit 1
+          fi
 
       # The action does not enforce the schema, so the full contract is
       # checked here; anything else is no verdict at all.

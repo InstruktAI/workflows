@@ -189,9 +189,21 @@ and npm package gets two answers:
   network calls, secret, credential or environment access, install or build
   scripts, and encoded or obfuscated blobs are flagged to it by pattern.
 
-The model runs in its own job with a read-only token, no shell, no network
-tools and no pull-request checkout; it reads only the prepared bundle and its
-JSON is validated with jq. A separate job posts the outcome as a PR comment
+The model runs in its own job with a read-only token and no pull-request
+checkout. Its working directory holds only `prompt.md` and the bundle, with
+no git repository in which the action could store its token. `--tools
+"Read,Glob,Grep"` leaves it no other built-in tool, `--disallowedTools
+"mcp__*"` no MCP tool, and the `blockReadsOutsideWorkingDirectories` setting
+makes its file tools refuse anything outside that directory, such as
+`/proc` or `$HOME`. `self-test-dep-pr-review.yml`'s `sandbox-probe` asks the
+real model to read a canary outside and checks the canary never reaches the
+transcript. Its JSON is validated with jq.
+
+What remains: everything inside the bundle is attacker-controllable text the
+model reads (prompt injection is mitigated, not impossible), which is why
+provenance is decided by scripts and a verdict only ever blocks or allows
+together with them. The read boundary is Claude Code's own enforcement;
+its docs call path rules best-effort for Grep and Glob. A separate job posts the outcome as a PR comment
 and fails the check on a provenance failure, a `not_sane` verdict, any
 dependency file it cannot review, or any missing result.
 

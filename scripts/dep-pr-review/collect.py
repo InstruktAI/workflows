@@ -325,6 +325,13 @@ def unpack(data: bytes, kind: str, dest: Path):
         safe_extract_zip(data, dest)
     else:
         safe_extract_tar(data, dest)
+    # A .git directory inside an artifact is removed (named in a note file):
+    # the model's workspace must contain no git repository.
+    for dirpath, dirnames, _ in os.walk(dest):
+        if ".git" in dirnames:
+            shutil.rmtree(Path(dirpath) / ".git")
+            Path(dirpath, ".git.removed-by-dep-pr-review").write_text("a .git directory was removed here\n")
+            dirnames.remove(".git")
     # Symlinks become plain files naming their target: the bundle is checked
     # file by file after upload, and a link must not point outside it.
     for dirpath, dirnames, filenames in os.walk(dest):

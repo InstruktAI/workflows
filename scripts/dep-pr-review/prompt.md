@@ -7,7 +7,8 @@ has no reason to add.
 
 ## Your input, and how far to trust it
 
-Everything is in the directory `bundle/`. Read only files under `bundle/`.
+Everything is in the directory `bundle/`. Your tools can read only this
+working directory: `prompt.md` and `bundle/`.
 
 - `bundle/summary.json` lists every updated dependency: ecosystem, name, old
   and new version (or commit), the provenance result, and `flags`.
