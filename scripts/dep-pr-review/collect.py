@@ -47,7 +47,6 @@ MAX_DOWNLOAD = 64 * 1024 * 1024
 # environment override exists for the self-test.
 MAX_PATCH_BYTES = int(os.environ.get("DEP_PR_REVIEW_MAX_PATCH_BYTES", 2 * 1024 * 1024))
 MAX_NOTES_BYTES = 40 * 1024
-SKIP_DIRS = {".git", "node_modules", "target", ".venv", "venv", "dist", "__pycache__"}
 
 CRATES_IO_SOURCES = {
     "registry+https://github.com/rust-lang/crates.io-index",
@@ -246,8 +245,11 @@ class Change:
 
 
 def walk(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+    """Every file of an exported tree. No directory is skipped: the trees
+    hold exactly the tracked paths (export-tree.py), and a lockfile or
+    submodule pointer under dist/, target/ or node_modules/ is as much a
+    dependency change as one at the root."""
+    for dirpath, _, filenames in os.walk(root):
         for filename in filenames:
             path = Path(dirpath) / filename
             yield path.relative_to(root).as_posix(), path

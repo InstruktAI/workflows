@@ -40,7 +40,7 @@ jobs:
       - name: Collect the fixture updates
         run: |
           set -euo pipefail
-          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna npm-branch-build action-many-to-one quoted-uses; do
+          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna npm-branch-build action-many-to-one quoted-uses excluded-dirs; do
             python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
               --out "$RUNNER_TEMP/$fixture"
           done
@@ -108,6 +108,11 @@ jobs:
           check quoted-uses '[.dependencies[] | select(.ecosystem == "action") | .provenance.status] == ["pass"]'
           # shellcheck disable=SC2016
           check quoted-uses '[.dependencies[] | select(.ecosystem == "unhandled") | .name] | sort == ["action `docker://alpine:3`", "action `docker://busybox:1`"]'
+          # No directory is skipped: a submodule bump under vendor/dist/ and a
+          # lockfile under target/ are seen next to the passing time update.
+          check excluded-dirs '.unsupported_files == ["submodule vendor/dist/sub"]'
+          check excluded-dirs '[.dependencies[] | select(.ecosystem == "npm") | .files[0], .provenance.status] == ["target/app/package-lock.json", "fail"]'
+          check excluded-dirs '[.dependencies[] | select(.name == "time") | .provenance.status] == ["pass"]'
           for fixture in crate-time action-release action-bad-sha action-reused-sha; do check "$fixture" '.unsupported_files == []'; done
 
       - name: The bundle manifest covers hidden files and catches a missing one
@@ -157,6 +162,9 @@ jobs:
           python3 -I "$TOOL/report.py" --name t --collect success --review success \
             --summary "$RUNNER_TEMP/action-tag-to-sha/summary.json" --verdict "$FIXTURES/verdict-sane.json" --out incomplete.md > /dev/null
           incomplete=$?
+          python3 -I "$TOOL/report.py" --name t --collect success --review success \
+            --summary "$RUNNER_TEMP/excluded-dirs/summary.json" --verdict "$FIXTURES/verdict-sane.json" --out hidden.md > /dev/null
+          hidden=$?
           cat blocked.md
           # shellcheck disable=SC2016 # the backticks are literal text in the comment
           [ "$blocked" = 1 ] && grep -q 'provenance check failed for action `actions/checkout`' blocked.md \
@@ -164,7 +172,8 @@ jobs:
             && [ "$failed" = 1 ] && grep -q 'collector did not finish' failed.md \
             && [ "$unverifiable" = 1 ] && grep -q 'provenance could not be verified' unverifiable.md \
             && ! grep -q 'Passed' unverifiable.md \
-            && [ "$incomplete" = 1 ] && grep -q 'the code review cannot be complete' incomplete.md
+            && [ "$incomplete" = 1 ] && grep -q 'the code review cannot be complete' incomplete.md \
+            && [ "$hidden" = 1 ] && grep -q 'submodule vendor/dist/sub' hidden.md && ! grep -q 'Passed' hidden.md
 
   # The pinned claude-code-action's own actor check accepts renovate[bot]
   # with the allowed_bots value dep-pr-review.yml passes, and nothing else.
