@@ -193,14 +193,23 @@ class Change:
     name: str
     old: str | None         # old version or ref (None: newly added)
     new: str
-    old_comment: str | None = None
-    new_comment: str | None = None
+    old_pin: dict | None = None   # the whole locked entry, locator included
+    new_pin: dict = field(default_factory=dict)
     files: list[str] = field(default_factory=list)
 
     @property
+    def old_comment(self) -> str | None:
+        return (self.old_pin or {}).get("comment")
+
+    @property
+    def new_comment(self) -> str | None:
+        return self.new_pin.get("comment")
+
+    @property
     def id(self) -> str:
+        digest = hashlib.sha256(json.dumps(self.new_pin, sort_keys=True).encode()).hexdigest()[:8]
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{self.ecosystem}-{self.name}-{self.new}")
-        return safe[:120]
+        return f"{safe[:110]}-{digest}"
 
 
 def walk(root: Path):
@@ -211,12 +220,19 @@ def walk(root: Path):
             yield path.relative_to(root).as_posix(), path
 
 
-def read_versions(root: Path) -> dict[tuple[str, str], dict[str, set]]:
-    """{(ecosystem, name): {version_or_ref: {(comment, file), ...}}}"""
-    found: dict[tuple[str, str], dict[str, set]] = {}
+def uv_dist(entry: dict | None) -> dict | None:
+    return {"url": entry.get("url"), "hash": entry.get("hash")} if entry else None
 
-    def add(ecosystem, name, version, rel, comment=None):
-        found.setdefault((ecosystem, name), {}).setdefault(version, set()).add((comment, rel))
+
+def read_pins(root: Path) -> dict[tuple[str, str, str], list[dict]]:
+    """{(ecosystem, name, file): [pin, ...]}. A pin is the whole locked entry
+    that decides what gets installed: the version plus where it comes from
+    and its hash, so a changed URL or hash at the same version is an update
+    too."""
+    found: dict[tuple[str, str, str], list[dict]] = {}
+
+    def add(ecosystem: str, name: str, rel: str, pin: dict):
+        found.setdefault((ecosystem, name, rel), []).append(pin)
 
     for rel, path in walk(root):
         base = path.name
@@ -224,11 +240,15 @@ def read_versions(root: Path) -> dict[tuple[str, str], dict[str, set]]:
             if base == "Cargo.lock":
                 for package in tomllib.loads(path.read_text()).get("package", []):
                     if package.get("source") in CRATES_IO_SOURCES:
-                        add("crate", package["name"], package["version"], rel)
+                        add("crate", package["name"], rel, {"version": package["version"],
+                            "source": package["source"], "checksum": package.get("checksum")})
             elif base == "uv.lock":
                 for package in tomllib.loads(path.read_text()).get("package", []):
-                    if (package.get("source") or {}).get("registry") in PYPI_REGISTRIES:
-                        add("pypi", package["name"].lower(), package["version"], rel)
+                    source = package.get("source") or {}
+                    if source.get("registry") in PYPI_REGISTRIES:
+                        add("pypi", package["name"].lower(), rel, {"version": package["version"],
+                            "source": source["registry"], "sdist": uv_dist(package.get("sdist")),
+                            "wheels": sorted((uv_dist(w) for w in package.get("wheels", [])), key=lambda w: w["url"] or "")})
             elif base in ("package-lock.json", "npm-shrinkwrap.json"):
                 data = json.loads(path.read_text())
                 for key, package in (data.get("packages") or {}).items():
@@ -238,27 +258,50 @@ def read_versions(root: Path) -> dict[tuple[str, str], dict[str, set]]:
                     if resolved and not resolved.startswith(NPM_REGISTRY):
                         continue
                     name = package.get("name") or key.rsplit("node_modules/", 1)[-1]
-                    add("npm", name, package["version"], rel)
+                    add("npm", name, rel, {"version": package["version"], "resolved": package.get("resolved"),
+                                           "integrity": package.get("integrity")})
             elif base == "pnpm-lock.yaml":
-                in_packages = False
-                for line in path.read_text().splitlines():
-                    if re.match(r"^(packages|snapshots):\s*$", line):
-                        in_packages = line.startswith("packages")
-                        continue
-                    if re.match(r"^\S", line):
-                        in_packages = False
-                    match = in_packages and re.match(r"^  '?/?((?:@[^@/\s]+/)?[^@\s'(]+)@([^\s'(:]+)", line)
-                    if match:
-                        add("npm", match[1], match[2], rel)
+                for name, version, resolution in pnpm_packages(path.read_text()):
+                    add("npm", name, rel, {"version": version, "integrity": resolution.get("integrity")})
             elif WORKFLOW_FILE.search(rel):
                 for match in USES.finditer(path.read_text()):
                     target = match["target"]
                     if target.startswith(("./", "docker://")):
                         continue
-                    add("action", target, match["ref"], rel, match["comment"])
+                    add("action", target, rel, {"version": match["ref"], "comment": match["comment"]})
         except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as error:
             raise SystemExit(f"cannot parse {rel}: {error}")
     return found
+
+
+PNPM_KEY = re.compile(r"^  '?/?((?:@[^@/\s]+/)?[^@\s'(]+)@([^\s'(:]+)[^:]*'?:\s*$")
+PNPM_RESOLUTION = re.compile(r"^    resolution:\s*\{(.*)\}\s*$")
+
+
+def pnpm_packages(text: str):
+    """(name, version, resolution) for each entry of a pnpm lockfile's
+    `packages:` section; resolution is the parsed `{integrity: ...}` or
+    `{tarball: ...}` mapping."""
+    in_packages, current = False, None
+    for line in text.splitlines():
+        if re.match(r"^\S", line):
+            in_packages = line.rstrip() == "packages:"
+            current = None
+            continue
+        if not in_packages:
+            continue
+        key = PNPM_KEY.match(line)
+        if key:
+            current = (key[1], key[2])
+            continue
+        res = current and PNPM_RESOLUTION.match(line)
+        if res:
+            resolution = dict(
+                (k.strip(), v.strip().strip("'\""))
+                for k, _, v in (part.partition(":") for part in res[1].split(","))
+            )
+            yield current[0], current[1], resolution
+            current = None
 
 
 def changed_files(base: Path, head: Path) -> list[str]:
@@ -268,34 +311,42 @@ def changed_files(base: Path, head: Path) -> list[str]:
     return sorted(rel for rel in set(old) | set(new) if old.get(rel) != new.get(rel))
 
 
-def per_file(found: dict[tuple[str, str], dict[str, set]]) -> dict[tuple[str, str, str], dict[str, str | None]]:
-    """{(ecosystem, name, file): {version_or_ref: comment}}"""
-    out: dict[tuple[str, str, str], dict[str, str | None]] = {}
-    for (ecosystem, name), versions in found.items():
-        for version, places in versions.items():
-            for comment, rel in places:
-                slot = out.setdefault((ecosystem, name, rel), {})
-                slot[version] = slot.get(version) or comment
-    return out
+def major(version: str) -> str:
+    match = re.match(r"v?(\d+)", version)
+    return match[1] if match else version
+
+
+def pair(new_pin: dict, removed: list[dict]) -> dict | None:
+    """The old pin this new one replaces: same version (a changed locator),
+    else the only one of the same major version, else the only one."""
+    for rule in (lambda p: p["version"] == new_pin["version"],
+                 lambda p: major(p["version"]) == major(new_pin["version"]),
+                 lambda p: True):
+        candidates = [p for p in removed if rule(p)]
+        if len(candidates) == 1:
+            return candidates[0]
+    return None
 
 
 def detect(base: Path, head: Path) -> tuple[list[Change], list[str]]:
-    """Updates are found per file: a version added to one lockfile or
-    workflow is an update even when another file already used it."""
-    old_all, new_all = per_file(read_versions(base)), per_file(read_versions(head))
-    merged: dict[tuple[str, str, str | None, str], Change] = {}
-    for key, new_versions in sorted(new_all.items()):
+    """Updates are found per file: a pin added to one lockfile or workflow
+    is an update even when another file already used it."""
+    old_all, new_all = read_pins(base), read_pins(head)
+    merged: dict[str, Change] = {}
+    for key, new_pins in sorted(new_all.items()):
         ecosystem, name, rel = key
-        old_versions = old_all.get(key, {})
-        added = sorted(set(new_versions) - set(old_versions))
-        removed = sorted(set(old_versions) - set(new_versions))
-        for version in added:
-            old = removed[0] if len(removed) == 1 else None
-            ident = (ecosystem, name, old, version)
+        old_pins = old_all.get(key, [])
+        old_keys = {json.dumps(p, sort_keys=True) for p in old_pins}
+        new_keys = {json.dumps(p, sort_keys=True) for p in new_pins}
+        removed = [p for p in old_pins if json.dumps(p, sort_keys=True) not in new_keys]
+        for pin in new_pins:
+            if json.dumps(pin, sort_keys=True) in old_keys:
+                continue
+            old = pair(pin, removed)
+            ident = json.dumps([ecosystem, name, old, pin], sort_keys=True)
             if ident not in merged:
-                merged[ident] = Change(ecosystem, name, old, version,
-                                       old_comment=old_versions.get(old) if old else None,
-                                       new_comment=new_versions[version])
+                merged[ident] = Change(ecosystem, name, old["version"] if old else None, pin["version"],
+                                       old_pin=old, new_pin=pin)
             merged[ident].files.append(rel)
     unsupported = [rel for rel in changed_files(base, head) if UNSUPPORTED.search(rel)]
     return list(merged.values()), unsupported
@@ -487,6 +538,13 @@ def review_crate(change: Change, base: Path, head: Path):
     if meta.get("checksum") and meta["checksum"] != new["sha256"]:
         checks.append("downloaded .crate does not match the checksum crates.io lists")
         status = "fail"
+    # The lockfile entry must lock exactly the artifact reviewed here.
+    locked = change.new_pin.get("checksum")
+    if locked != new["sha256"]:
+        checks.append(f"Cargo.lock checksum `{locked}` is not the reviewed crates.io artifact `{new['sha256']}`")
+        status = "fail"
+    else:
+        checks.append("Cargo.lock checksum is the reviewed crates.io artifact")
     old_data, old = (crate_files(change.name, change.old) if change.old else (None, None))
     expected = old["repository"] if old else http_json(f"https://crates.io/api/v1/crates/{change.name}")["crate"].get("repository")
     repo = github_repo(new["repository"])
@@ -529,6 +587,10 @@ def review_crate(change: Change, base: Path, head: Path):
 def npm_packument(name: str, version: str):
     quoted = name.replace("/", "%2f")
     return http_json(f"{NPM_REGISTRY}{quoted}/{version}")
+
+
+def npm_tarball_url(name: str, version: str) -> str:
+    return f"{NPM_REGISTRY}{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz"
 
 
 def npm_keys() -> dict:
@@ -586,6 +648,21 @@ def review_npm(change: Change, base: Path, head: Path):
     if hashlib.new(algo, new_data).hexdigest() != integrity_hex:
         checks.append("downloaded tarball does not match the registry integrity")
         status = "fail"
+    # The lockfile entry must lock exactly the artifact reviewed here: the
+    # default registry's tarball URL for name@version, and its integrity.
+    expected_url = npm_tarball_url(change.name, change.new)
+    resolved = change.new_pin.get("resolved")
+    if resolved is not None and resolved != expected_url:
+        checks.append(f"locked URL `{resolved}` is not the registry tarball `{expected_url}`")
+        status = "fail"
+    if dist["tarball"] != expected_url:
+        checks.append(f"registry tarball `{dist['tarball']}` is not the default URL `{expected_url}`")
+        status = "fail"
+    if change.new_pin.get("integrity") != integrity:
+        checks.append(f"locked integrity `{change.new_pin.get('integrity')}` is not the registry's `{integrity}`")
+        status = "fail"
+    else:
+        checks.append("locked URL and integrity are the reviewed registry tarball")
     problem = verify_npm_signature(change.name, change.new, dist, keys)
     if problem:
         checks.append(problem)
@@ -652,6 +729,24 @@ def review_pypi(change: Change, base: Path, head: Path):
     new_file = pypi_file(meta)
     if not new_file:
         return None, result("fail", [f"{change.name} {change.new} has no files on PyPI"]), ""
+    # Every distribution the lockfile records must be the file PyPI serves
+    # for that name and version, at PyPI's URL, with PyPI's digest.
+    served = {f["filename"]: f for f in meta.get("urls") or []}
+    locked = [d for d in [change.new_pin.get("sdist"), *change.new_pin.get("wheels", [])] if d]
+    if not locked:
+        checks.append("uv.lock records no distribution for this version")
+        status = "fail"
+    for dist in locked:
+        filename = (dist.get("url") or "").rsplit("/", 1)[-1]
+        real = served.get(urllib.parse.unquote(filename))
+        if not real:
+            checks.append(f"locked file `{dist.get('url')}` is not a file PyPI serves for {change.name} {change.new}")
+            status = "fail"
+        elif dist.get("url") != real["url"] or dist.get("hash") != f"sha256:{real['digests']['sha256']}":
+            checks.append(f"locked `{filename}` does not match PyPI's URL and sha256")
+            status = "fail"
+    if status == "pass":
+        checks.append(f"all {len(locked)} locked distributions are PyPI's files with PyPI's sha256")
     new_data = http_get(new_file["url"])
     if hashlib.sha256(new_data).hexdigest() != new_file["digests"]["sha256"]:
         checks.append("downloaded file does not match the PyPI sha256 digest")

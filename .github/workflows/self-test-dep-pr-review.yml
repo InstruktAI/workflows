@@ -35,7 +35,7 @@ jobs:
       - name: Collect the fixture updates
         run: |
           set -euo pipefail
-          for fixture in crate-time action-release action-bad-sha action-reused-sha; do
+          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap; do
             python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
               --out "$RUNNER_TEMP/$fixture"
           done
@@ -51,6 +51,13 @@ jobs:
           check action-bad-sha '.dependencies[0].provenance.status == "fail" and (.dependencies[0].provenance.checks[0] | contains("is not the commit of upstream tag `v7.0.1`"))'
           # b.yml moves to a SHA a.yml already used: still an update of b.yml
           check action-reused-sha '.dependencies | length == 1 and .[0].files == [".github/workflows/b.yml"] and .[0].provenance.status == "pass"'
+          # Same version, swapped locator: still an update, and blocked.
+          # shellcheck disable=SC2016 # the backticks are literal text in the messages
+          check npm-url-swap '.dependencies | length == 1 and .[0].from == .[0].to and .[0].provenance.status == "fail" and any(.[0].provenance.checks[]; contains("is not the registry tarball"))'
+          # shellcheck disable=SC2016
+          check crate-checksum-swap '.dependencies | length == 1 and .[0].provenance.status == "fail" and any(.[0].provenance.checks[]; contains("is not the reviewed crates.io artifact"))'
+          # shellcheck disable=SC2016
+          check pypi-hash-swap '.dependencies | length == 1 and .[0].provenance.status == "fail" and any(.[0].provenance.checks[]; contains("does not match PyPI"))'
           for fixture in crate-time action-release action-bad-sha action-reused-sha; do check "$fixture" '.unsupported_files == []'; done
 
       - name: The bundle manifest covers hidden files and catches a missing one
