@@ -1,0 +1,47 @@
+name: self-test-vulnerable
+
+# Negative test, throwaway branch only: every job here must FAIL. Each call
+# leaves on only the gate under test, so a red job proves that gate fails.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny-vulnerable:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/cargo
+      dependency-review: never
+      osv-scanner: false
+
+  pip-audit-vulnerable:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/uv
+      dependency-review: never
+      osv-scanner: false
+
+  npm-audit-vulnerable:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/npm
+      dependency-review: never
+      osv-scanner: false
+
+  osv-scanner-malicious:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/malicious-npm
+      dependency-review: never
+      node-audit: false
+
+  dependency-review-vulnerable:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/npm
+      osv-scanner: false
+      node-audit: false
