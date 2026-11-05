@@ -1,0 +1,145 @@
+name: self-test-dep-pr-review
+
+# Proves the dependency-PR path against real upstream releases:
+#   collector       - provenance passes for genuine releases (crate `time`
+#                     0.3.45 -> 0.3.47, actions/checkout v7.0.0 -> v7.0.1) and
+#                     fails for an action SHA that is not the release commit;
+#                     the flag scanner and the outcome gate behave.
+#   advisory-fix    - under the shared Renovate preset an advisory fix is
+#                     proposed at once while an ordinary update waits.
+#   time-fix        - the whole dep-pr-review workflow, model included,
+#                     passes the genuine `time` fix. Needs the
+#                     CLAUDE_CODE_OAUTH_TOKEN secret; skipped without it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collector:
+    runs-on: ubuntu-latest
+    env:
+      FIXTURES: test/fixtures/dep-pr-review
+      TOOL: scripts/dep-pr-review
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Collect the fixture updates
+        run: |
+          set -euo pipefail
+          for fixture in crate-time action-release action-bad-sha; do
+            python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
+              --out "$RUNNER_TEMP/$fixture"
+          done
+
+      - name: Genuine releases pass provenance, a non-release SHA fails it
+        run: |
+          set -euo pipefail
+          check() { jq -e "$2" "$RUNNER_TEMP/$1/summary.json" > /dev/null || { echo "::error::$1: $2"; jq . "$RUNNER_TEMP/$1/summary.json"; exit 1; }; }
+          # .cargo_vcs_info.json commit is upstream tag v0.3.47, repository unchanged
+          check crate-time '.dependencies[] | select(.name == "time") | .from == "0.3.45" and .to == "0.3.47" and .provenance.status == "pass" and .provenance.tag == "v0.3.47"'
+          check action-release '.dependencies == [.dependencies[] | select(.name == "actions/checkout" and .provenance.status == "pass" and .provenance.tag == "v7.0.1")]'
+          # shellcheck disable=SC2016 # the backticks are literal text in the message
+          check action-bad-sha '.dependencies[0].provenance.status == "fail" and (.dependencies[0].provenance.checks[0] | contains("is not the commit of upstream tag `v7.0.1`"))'
+          for fixture in crate-time action-release action-bad-sha; do check "$fixture" '.unsupported_files == []'; done
+
+      - name: The scanner flags network, secrets, install scripts and encoded blobs
+        run: |
+          python3 -I "$TOOL/collect.py" --scan-patch "$FIXTURES/flags.patch" > flags.json
+          jq -e 'has("network") and has("env-or-secrets") and has("install-or-build-script") and has("encoded-or-obfuscated")' flags.json
+
+      - name: The outcome gate blocks on provenance and passes a sane verdict
+        run: |
+          set -uo pipefail
+          python3 -I "$TOOL/report.py" --name t --collect success --review skipped \
+            --summary "$RUNNER_TEMP/action-bad-sha/summary.json" --out blocked.md > /dev/null
+          blocked=$?
+          python3 -I "$TOOL/report.py" --name t --collect success --review success \
+            --summary "$RUNNER_TEMP/action-release/summary.json" --verdict "$FIXTURES/verdict-sane.json" --out passed.md > /dev/null
+          passed=$?
+          python3 -I "$TOOL/report.py" --name t --collect failure --review skipped --out failed.md > /dev/null
+          failed=$?
+          cat blocked.md
+          # shellcheck disable=SC2016 # the backticks are literal text in the comment
+          [ "$blocked" = 1 ] && grep -q 'provenance check failed for `actions/checkout`' blocked.md \
+            && [ "$passed" = 0 ] && grep -q '\*\*Passed\.\*\*' passed.md \
+            && [ "$failed" = 1 ] && grep -q 'collector did not finish' failed.md
+
+  # Renovate's local platform runs a lookup over the working directory and
+  # can write a report file (docs.renovatebot.com/modules/platform/local,
+  # docs.renovatebot.com/self-hosted-configuration/#reporttype). OSV alerts
+  # stand in for GitHub's advisory alerts, which the local platform cannot
+  # read; Renovate builds both kinds of vulnerability rule from the same
+  # `vulnerabilityAlerts` config (lib/workers/repository/process/
+  # vulnerabilities.ts). minimumReleaseAge is raised to ten years so that
+  # every ordinary update is held, whatever its age.
+  advisory-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Renovate lookup under the shared preset
+        env:
+          RENOVATE_VERSION: 44.199.2
+          LOG_LEVEL: info
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/advisory"
+          cp -R test/fixtures/renovate-advisory "$work"
+          jq '. + {"osvVulnerabilityAlerts": true, "minimumReleaseAge": "3650 days"}' renovate/default.json > "$work/renovate.json"
+          cd "$work"
+          git init -q && git add -A && git -c user.name=t -c user.email=t@invalid commit -qm fixture
+          npx --yes "renovate@${RENOVATE_VERSION}" --platform=local --report-type=file --report-path="$RUNNER_TEMP/report.json"
+
+      - name: The advisory fix is proposed, the ordinary update waits
+        run: |
+          set -euo pipefail
+          jq '[.. | objects | select(has("depName") and (.depName == "minimist" or .depName == "ms")) | {depName, currentVersion, updates}]' "$RUNNER_TEMP/report.json" | tee deps.json
+          # minimist 1.2.5 has GHSA-xvch-5gv4-984h, fixed in 1.2.6
+          jq -e '[.[] | select(.depName == "minimist") | .updates[] | select(.isVulnerabilityAlert == true and .newVersion != null and ((.pendingChecks // false) | not))] | length > 0' deps.json
+          # ms 2.1.2 -> 2.1.3 is an ordinary update and is held
+          jq -e '[.[] | select(.depName == "ms") | .updates[] | select((.pendingChecks // false) | not) | select(.newVersion != null)] | length == 0' deps.json
+
+  token:
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::CLAUDE_CODE_OAUTH_TOKEN is not available to this repository; the model review self-test is skipped"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  time-fix:
+    needs: token
+    if: needs.token.outputs.present == 'true'
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/dep-pr-review.yml
+    with:
+      base-dir: test/fixtures/dep-pr-review/crate-time/base
+      head-dir: test/fixtures/dep-pr-review/crate-time/head
+      name: self-test-time-fix
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

