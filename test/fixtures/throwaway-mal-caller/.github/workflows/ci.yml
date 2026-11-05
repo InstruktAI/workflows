@@ -3,4 +3,4 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: InstruktAI/workflows/test/fixtures/throwaway-mal@7dc1ca367e6cd085a2cf39414e5e734b60b2f780 # v0.0.1-dpr-fixture
+      - uses: InstruktAI/workflows/test/fixtures/throwaway-mal@43f79924d4e3a948ac5c02f17ac25311ec84ce9d # v0.0.2-dpr-fixture
