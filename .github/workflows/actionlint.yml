@@ -32,14 +32,18 @@ jobs:
         run: ./actionlint -color
       # Consumers pin this repo; that pin only holds all the way down when
       # every action this repo calls is itself a full commit SHA with its
-      # version as a comment.
+      # version as a comment. The values come from parsed YAML (yq ships on
+      # the hosted ubuntu image), so flow mappings count and a comment can
+      # never satisfy the check.
       - name: Every third-party action is pinned to a commit SHA
         run: |
-          unpinned=$(grep -rnE '^\s*-?\s*uses:\s' .github/workflows \
-            | grep -vE 'uses:\s*\./' \
-            | grep -vE 'uses:\s*[^@[:space:]]+@[0-9a-f]{40}\s+#\s*\S' || true)
-          if [ -n "$unpinned" ]; then
-            echo "::error::actions not pinned to a full commit SHA with a version comment:"
-            echo "$unpinned"
-            exit 1
-          fi
+          set -euo pipefail
+          yq --version
+          python3 -I scripts/check-pins.py .github/workflows/*.yml
+          python3 -I scripts/check-pins.py test/fixtures/pin-check/good/*.yml
+          for bad in test/fixtures/pin-check/bad/*.yml; do
+            if python3 -I scripts/check-pins.py "$bad" > /dev/null; then
+              echo "::error::check-pins accepted $bad"
+              exit 1
+            fi
+          done
