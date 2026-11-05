@@ -1,0 +1,23 @@
+name: self-test-dpr-throwaway
+
+# Throwaway test, never merged: the pull request bumps a fixture action to a
+# release whose provenance passes but whose code is malicious; only the
+# model's verdict may block it. The fixture is never run.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/dep-pr-review.yml
+    with:
+      review-all-authors: true
+      name: throwaway
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
