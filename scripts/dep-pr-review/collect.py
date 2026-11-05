@@ -43,7 +43,9 @@ from pathlib import Path
 USER_AGENT = "InstruktAI-dep-pr-review (+https://github.com/InstruktAI/workflows)"
 GITHUB_API = "https://api.github.com"
 MAX_DOWNLOAD = 64 * 1024 * 1024
-MAX_PATCH_BYTES = 400 * 1024
+# Over this the change cannot be reviewed completely and blocks. The
+# environment override exists for the self-test.
+MAX_PATCH_BYTES = int(os.environ.get("DEP_PR_REVIEW_MAX_PATCH_BYTES", 2 * 1024 * 1024))
 MAX_NOTES_BYTES = 40 * 1024
 SKIP_DIRS = {".git", "node_modules", "target", ".venv", "venv", "dist", "__pycache__"}
 
@@ -547,10 +549,14 @@ def review_action(change: Change):
 
 
 def fetch_action(repo: str, change: Change):
-    if not change.old or not FULL_SHA.match(change.old):
+    """(old, new, kind); old is None for a new action or an old ref that is
+    not a commit (collect() blocks that case: it cannot be diffed exactly)."""
+    if not FULL_SHA.match(change.new):
         return None
-    old = http_get(f"https://codeload.github.com/{repo}/tar.gz/{change.old}")
     new = http_get(f"https://codeload.github.com/{repo}/tar.gz/{change.new}")
+    old = None
+    if change.old and FULL_SHA.match(change.old):
+        old = http_get(f"https://codeload.github.com/{repo}/tar.gz/{change.old}")
     return old, new, "tar"
 
 
@@ -626,7 +632,7 @@ def review_crate(change: Change, base: Path, head: Path):
         else:
             checks.append(f"commit {sha} does not exist in {repo}")
             status = "fail"
-    artifacts = (old_data, new_data, "tar") if old_data else None
+    artifacts = (old_data, new_data, "tar")
     tags = [t for t in (tag,) if t]
     return artifacts, result(status, checks, repository=new["repository"], commit=sha, tag=tag), release_notes(repo, tags)
 
@@ -734,7 +740,7 @@ def review_npm(change: Change, base: Path, head: Path):
     else:
         checks.append("no provenance attestation; registry signature only")
     old_data = http_get(old_meta["dist"]["tarball"]) if old_meta else None
-    artifacts = (old_data, new_data, "tar") if old_data else None
+    artifacts = (old_data, new_data, "tar")
     repo = source or declared
     found = find_tag(repo, change.name.rsplit("/", 1)[-1], change.new) if repo else None
     return artifacts, result(status, checks, repository=repo), release_notes(repo, [found[0]] if found else [])
@@ -826,7 +832,7 @@ def review_pypi(change: Change, base: Path, head: Path):
     kind = "zip" if new_file["filename"].endswith(".whl") else "tar"
     if old_file and old_file["filename"].endswith(".whl") != new_file["filename"].endswith(".whl"):
         old_data = None
-    artifacts = (old_data, new_data, kind) if old_data else None
+    artifacts = (old_data, new_data, kind)
     found = find_tag(repo, change.name, change.new) if repo else None
     return artifacts, result(status, checks, repository=repo, file=new_file["filename"]), release_notes(repo, [found[0]] if found else [])
 
@@ -861,18 +867,32 @@ def collect(base: Path, head: Path, out: Path) -> dict:
             artifacts, provenance, notes = None, result("fail", [f"provenance check could not complete: {error}"]), ""
         entry["provenance"] = provenance
         (folder / "release-notes.md").write_text(notes or "No release notes.\n")
+        # Anything that keeps the model from seeing the complete change
+        # blocks the PR, whatever the verdict.
+        blockers: list[str] = []
         if artifacts:
             old_bytes, new_bytes, kind = artifacts
-            unpack(old_bytes, kind, folder / "old")
+            if old_bytes is None:
+                (folder / "old").mkdir(parents=True, exist_ok=True)
+                if change.old is None:
+                    entry["baseline"] = "empty: new dependency, its whole published artifact is the change"
+                else:
+                    blockers.append(f"the previous `{change.old}` cannot be fetched as an exact artifact "
+                                    "(not a commit SHA), so the change cannot be diffed")
+            else:
+                unpack(old_bytes, kind, folder / "old")
             unpack(new_bytes, kind, folder / "new")
-            patch = diff_trees(folder / "old", folder / "new")
-            entry["flags"] = scan_patch(patch)
-            entry["diff_bytes"] = len(patch.encode())
-            entry["diff_truncated"] = len(patch.encode()) > MAX_PATCH_BYTES
-            (folder / "diff.patch").write_bytes(patch.encode()[:MAX_PATCH_BYTES])
+            patch = diff_trees(folder / "old", folder / "new").encode()
+            entry["flags"] = scan_patch(patch.decode(errors="replace"))
+            entry["diff_bytes"] = len(patch)
+            if len(patch) > MAX_PATCH_BYTES:
+                blockers.append(f"the diff is {len(patch)} bytes, over the {MAX_PATCH_BYTES}-byte review cap")
+            (folder / "diff.patch").write_bytes(patch[:MAX_PATCH_BYTES])
         else:
             entry["flags"] = {}
-            entry["diff"] = "none: newly added dependency or no comparable old artifact"
+            if change.ecosystem != "unhandled":
+                blockers.append("no published artifact could be fetched to review")
+        entry["review_blockers"] = blockers
         (folder / "provenance.json").write_text(json.dumps(provenance, indent=2))
         entries.append(entry)
     summary = {"dependencies": entries, "unsupported_files": unsupported}

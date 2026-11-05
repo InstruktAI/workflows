@@ -14,8 +14,9 @@ working directory: `prompt.md` and `bundle/`.
   and new version (or commit), the provenance result, and `flags`.
 - `bundle/<id>/diff.patch`: the unified diff between the old and new
   **published artifacts** (crate file, npm tarball, PyPI file, or the action's
-  source at each commit). It can be truncated (`diff_truncated` in the
-  summary); `bundle/<id>/old/` and `bundle/<id>/new/` hold the full trees.
+  source at each commit). For a new dependency (`baseline` in the summary)
+  the old side is empty, so the whole artifact is the change.
+  `bundle/<id>/old/` and `bundle/<id>/new/` hold the full trees.
 - `bundle/<id>/release-notes.md`: the upstream release notes and changelog.
 - `bundle/<id>/provenance.json`: the deterministic provenance checks.
 

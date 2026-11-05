@@ -101,6 +101,9 @@ def main() -> int:
                 blockers.append(f"provenance check failed for {label}")
             elif prov["status"] != "pass":
                 blockers.append(f"provenance could not be verified for {label}")
+            for reason in dep.get("review_blockers", []):
+                lines.append(f"  - review incomplete: {code(reason)}")
+                blockers.append(f"the code review cannot be complete for {label}")
         flagged = [(d, d["flags"]) for d in deps if d.get("flags")]
         if flagged:
             lines += ["", "<details><summary>Pattern flags handed to the reviewer (hints, not findings)</summary>", ""]
