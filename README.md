@@ -81,7 +81,7 @@ change to this repo.
 What it sets: `config:recommended` and `:semanticCommits`; minor, patch, pin
 and digest updates auto-merge with `automergeType: "pr"` and
 `platformAutomerge: false`, so Renovate merges itself only once every status
-check and check run on the PR is green (no branch protection needed); majors
+check and check run present on the PR is green (see the limit below); majors
 never auto-merge; non-security updates wait `minimumReleaseAge: "3 days"`,
 vulnerability fixes skip the wait and get the `security` label; lock file
 maintenance is off: it would move every transitive dependency to brand-new
@@ -89,6 +89,57 @@ versions with no release age to wait for, which is the window malicious
 releases use. Transitive dependencies move with their direct dependency, and
 vulnerable ones get vulnerability PRs. Those need the repo's Dependabot alerts
 on.
+
+### Checks Renovate cannot wait for
+
+Renovate's wait covers only the checks that already exist when it evaluates
+the branch: it reads the commit statuses and check runs on the head and
+merges when all of them are green (`getBranchStatus` in
+`lib/modules/platform/github/index.ts`, Renovate 44.219.0). It has no setting
+that names a check it must wait for. The repo's own workflow runs start on
+the push, and Renovate only tries to automerge on a later run, so their jobs
+are in place by then. A check posted by a third-party app (Socket, for
+example) can arrive after Renovate has evaluated, and the PR merges without
+it. Requiring a check also covers your own jobs if you want that guarantee.
+
+Make every such check a required status check with a repository ruleset that
+no one bypasses, Renovate included. GitHub then refuses the merge until the
+check has passed. Find the exact check name and app id on a recent PR:
+
+```sh
+gh api repos/OWNER/REPO/commits/SHA/check-runs \
+  --jq '.check_runs[] | "\(.name)  app=\(.app.id)"'
+```
+
+Then create the ruleset (repo admin):
+
+```sh
+gh api -X POST repos/OWNER/REPO/rulesets --input - <<'JSON'
+{
+  "name": "required third-party checks",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "required_status_checks": [
+          { "context": "CHECK NAME", "integration_id": APP_ID }
+        ]
+      }
+    }
+  ]
+}
+JSON
+```
+
+`integration_id` ties the check to that app, so no other app or workflow can
+satisfy it by reusing the name. A required check also applies to direct pushes
+to the default branch: if release automation pushes there, give only that
+identity a bypass, never Renovate.
 
 ## Not here on purpose
 
