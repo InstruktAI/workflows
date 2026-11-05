@@ -1,0 +1,27 @@
+{
+  "dependencies": [
+    {
+      "ecosystem": "action",
+      "name": "evil/[x](https://evil.invalid)",
+      "from": "a",
+      "to": "b",
+      "from_comment": "`v1`",
+      "to_comment": "v2 | ![i](https://evil.invalid/i.png)",
+      "flags": {
+        "network": {
+          "count": 1,
+          "samples": []
+        }
+      },
+      "provenance": {
+        "status": "pass",
+        "checks": [
+          "@Morriz <b>bold</b> `tick` \\| pipe [l](https://evil.invalid)"
+        ]
+      }
+    }
+  ],
+  "unsupported_files": [
+    "x](https://evil.invalid)"
+  ]
+}

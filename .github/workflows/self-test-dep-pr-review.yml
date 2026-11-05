@@ -105,6 +105,30 @@ jobs:
             && [ "$unverifiable" = 1 ] && grep -q 'provenance could not be verified' unverifiable.md \
             && ! grep -q 'Passed' unverifiable.md
 
+  # Untrusted values (names, versions, checks, the model's text) must render
+  # as literal text: hostile input full of links, images, HTML, mentions and
+  # fence-breaking backticks leaves no active markup outside code.
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Hostile input renders inert
+        env:
+          F: test/fixtures/dep-pr-review/render
+        run: |
+          set -euo pipefail
+          python3 -I scripts/dep-pr-review/report.py --name t --collect success --review success \
+            --summary "$F/summary-hostile.json" --verdict "$F/verdict-hostile.json" --out comment.md > /dev/null || true
+          cat comment.md
+          python3 -I scripts/dep-pr-review/check-inert.py comment.md
+          printf 'x [a](https://e.invalid)\n' > active.md
+          if python3 -I scripts/dep-pr-review/check-inert.py active.md; then
+            echo "::error::the inertness check missed an active link"
+            exit 1
+          fi
+
   # The same upload settings dep-pr-review uses, round-tripped through the
   # artifact service: every file, hidden ones included, arrives intact.
   bundle-roundtrip:

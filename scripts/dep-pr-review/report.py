@@ -25,13 +25,23 @@ from pathlib import Path
 MAX_COMMENT = 60000
 
 
-def clean(text: object, limit: int = 2000) -> str:
-    """Model- and upstream-written text, made inert for a PR comment: no
-    mentions, no HTML, no table breaks, bounded length."""
-    value = str(text)[:limit]
-    value = value.replace("@", "@\u200b").replace("<", "&lt;").replace(">", "&gt;")
-    value = value.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
-    return re.sub(r"\s+", " ", value).strip()
+def code(text: object, limit: int = 400) -> str:
+    """An untrusted value as an inline code span: rendered literally, so no
+    Markdown, link, image, HTML or mention in it is active. The delimiter is
+    one backtick longer than the longest backtick run inside, so the value
+    cannot close the span early (CommonMark, "Code spans")."""
+    value = re.sub(r"\s+", " ", str(text)[:limit]).strip() or " "
+    ticks = "`" * (max((len(run) for run in re.findall(r"`+", value)), default=0) + 1)
+    pad = " " if value.startswith(("`", " ")) or value.endswith(("`", " ")) else ""
+    return f"{ticks}{pad}{value}{pad}{ticks}"
+
+
+def block(text: str) -> list[str]:
+    """Untrusted multi-line text as a fenced code block whose fence is longer
+    than any backtick run inside, so the text cannot end the block."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [fence + "text", text.replace("\r", ""), fence]
 
 
 def load(path: Path | None):
@@ -69,13 +79,12 @@ def main() -> int:
     unsupported = summary["unsupported_files"]
     if unsupported:
         blockers.append("dependency files changed that this review cannot check: "
-                        + ", ".join(f"`{clean(f, 200)}`" for f in unsupported))
+                        + ", ".join(code(f, 200) for f in unsupported))
     if not deps and not unsupported and args.collect == "success":
         blockers.append("no updated GitHub Action, crate, PyPI or npm dependency was found to review")
 
     if deps:
-        lines += ["### Provenance (deterministic)", "",
-                  "| Dependency | Change | Result | Checks |", "| --- | --- | --- | --- |"]
+        lines += ["### Provenance (deterministic)", ""]
         for dep in deps:
             prov = dep["provenance"]
             frm = dep.get("from_comment") or dep.get("from") or "new"
@@ -83,21 +92,21 @@ def main() -> int:
             if dep["ecosystem"] == "action":
                 frm = f"{frm} ({(dep.get('from') or '')[:12]})"
                 to = f"{to} ({dep['to'][:12]})"
-            lines.append(f"| {dep['ecosystem']} `{clean(dep['name'], 200)}` | {clean(frm, 120)} → {clean(to, 120)} "
-                         f"| **{prov['status']}** | {'; '.join(clean(c, 400) for c in prov['checks'])} |")
+            label = f"{dep['ecosystem']} {code(dep['name'], 200)} {code(frm, 120)} → {code(to, 120)}"
+            lines.append(f"- {label}: **{prov['status']}**")
+            lines += [f"  - {code(c)}" for c in prov["checks"]]
             # Only positive provenance lets the gate pass: `unverifiable` blocks
             # with its reason just as `fail` does.
             if prov["status"] == "fail":
-                blockers.append(f"provenance check failed for `{clean(dep['name'], 200)}` {clean(to, 120)}")
+                blockers.append(f"provenance check failed for {label}")
             elif prov["status"] != "pass":
-                blockers.append(f"provenance could not be verified for `{clean(dep['name'], 200)}` {clean(to, 120)}: "
-                                + "; ".join(clean(c, 400) for c in prov["checks"]))
+                blockers.append(f"provenance could not be verified for {label}")
         flagged = [(d, d["flags"]) for d in deps if d.get("flags")]
         if flagged:
             lines += ["", "<details><summary>Pattern flags handed to the reviewer (hints, not findings)</summary>", ""]
             for dep, flags in flagged:
-                lines.append(f"- `{clean(dep['name'], 200)}`: " + ", ".join(
-                    f"{name} ×{info['count']}" for name, info in sorted(flags.items())))
+                lines.append(f"- {code(dep['name'], 200)}: " + ", ".join(
+                    f"{code(name, 60)} ×{int(info['count'])}" for name, info in sorted(flags.items())))
             lines += ["", "</details>"]
 
     if deps:
@@ -109,14 +118,15 @@ def main() -> int:
             blockers.append("the model review did not produce a valid verdict; see the `review` job log")
             lines.append("No valid verdict.")
         else:
-            lines.append(f"Verdict: **{verdict['verdict']}**")
-            lines.append("")
-            for reason in verdict["reasons"]:
-                lines.append(f"- {clean(reason)}")
+            # The verdict field is validated against an enum; everything else
+            # the model wrote is shown verbatim inside one fenced block.
+            lines += [f"Verdict: **{'sane' if verdict['verdict'] == 'sane' else 'not_sane'}**", ""]
+            text = ["Reasons:"] + [f"- {r}" for r in verdict["reasons"]]
             if verdict["findings"]:
-                lines += ["", "| Dependency | Category | Severity | Detail |", "| --- | --- | --- | --- |"]
-                for f in verdict["findings"]:
-                    lines.append(f"| {clean(f['dependency'], 200)} | {f['category']} | {f['severity']} | {clean(f['detail'])} |")
+                text += ["", "Findings:"]
+                text += [f"- [{f['severity']}/{f['category']}] {f['dependency']}: {f['detail']}"
+                         for f in verdict["findings"]]
+            lines += block("\n".join(text)[:20000])
             if verdict["verdict"] != "sane":
                 blockers.append("the model review judged the code change not sane")
 
