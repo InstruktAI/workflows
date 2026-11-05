@@ -987,6 +987,19 @@ def review_pypi(change: Change, base: Path, head: Path):
         if anchor_publishers and publishers != anchor_publishers:
             checks.append(f"trusted publisher changed: {change.old} by {anchor_publishers}, {change.new} by {publishers or 'none'}")
             status = "fail"
+    # Every new publisher and every signing certificate's repository must be
+    # the previous publication's trusted publisher. A first attestation has
+    # nothing to compare with: project_urls are self-declared and carry over
+    # unchanged, so they cannot vouch for who attests now.
+    if publishers and old_meta is not None and not anchor_publishers:
+        checks.append(f"publisher transition: {change.new} is attested by {', '.join(publishers)}, but "
+                      f"{change.old} had no trusted publisher to anchor on, so a human must confirm it")
+        status = "unverifiable" if status == "pass" else status
+    for f in with_attestation:
+        for claim in attested[f]["claims"]:
+            if anchor_publishers and claim.get("repo") not in anchor_publishers:
+                checks.append(f"`{f}` was signed for repository {claim.get('repo')}, not for {', '.join(anchor_publishers)}")
+                status = "fail"
     if publishers:
         bound = True
         for f in with_attestation:
