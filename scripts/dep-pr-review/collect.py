@@ -773,47 +773,81 @@ def pypi_provenance(name: str, version: str, filename: str):
     return [github_repo("github.com/" + p["repository"]) for p in publishers if p.get("kind") == "GitHub" and p.get("repository")]
 
 
+def dist_key(filename: str, version: str) -> str:
+    """What pairs a distribution with its counterpart in another version:
+    `sdist`, or a wheel's tags (the part after name-version-)."""
+    if not filename.endswith(".whl"):
+        return "sdist"
+    parts = filename[:-4].split("-")
+    return "wheel-" + "-".join(parts[2:]) if len(parts) >= 5 else f"wheel-{filename}"
+
+
+def locked_dists(pin: dict | None) -> list[dict]:
+    return [d for d in [(pin or {}).get("sdist"), *(pin or {}).get("wheels", [])] if d]
+
+
 def review_pypi(change: Change, base: Path, head: Path):
+    """Every distribution uv.lock records for the new version is checked and
+    reviewed on its own: consumers install wheels, not the sdist."""
     checks = []
     status = "pass"
     meta = try_json(f"https://pypi.org/pypi/{change.name}/{change.new}/json")
     if meta is None:
         return None, result("fail", [f"PyPI does not serve {change.name} {change.new} (404)"]), ""
-    new_file = pypi_file(meta)
-    if not new_file:
-        return None, result("fail", [f"{change.name} {change.new} has no files on PyPI"]), ""
-    # Every distribution the lockfile records must be the file PyPI serves
-    # for that name and version, at PyPI's URL, with PyPI's digest.
     served = {f["filename"]: f for f in meta.get("urls") or []}
-    locked = [d for d in [change.new_pin.get("sdist"), *change.new_pin.get("wheels", [])] if d]
+    locked = locked_dists(change.new_pin)
     if not locked:
-        checks.append("uv.lock records no distribution for this version")
-        status = "fail"
+        return None, result("fail", ["uv.lock records no distribution for this version"]), ""
+    old_meta = try_json(f"https://pypi.org/pypi/{change.name}/{change.old}/json") if change.old else None
+    old_served = {dist_key(f["filename"], change.old): f for f in (old_meta or {}).get("urls") or []}
+    artifacts = []
+    attested: dict[str, list[str] | None] = {}
     for dist in locked:
-        filename = (dist.get("url") or "").rsplit("/", 1)[-1]
-        real = served.get(urllib.parse.unquote(filename))
+        filename = urllib.parse.unquote((dist.get("url") or "").rsplit("/", 1)[-1])
+        real = served.get(filename)
+        # The locked file must be the file PyPI serves for this name and
+        # version, at PyPI's URL, with PyPI's digest, and download as such.
         if not real:
             checks.append(f"locked file `{dist.get('url')}` is not a file PyPI serves for {change.name} {change.new}")
             status = "fail"
-        elif dist.get("url") != real["url"] or dist.get("hash") != f"sha256:{real['digests']['sha256']}":
+            continue
+        if dist.get("url") != real["url"] or dist.get("hash") != f"sha256:{real['digests']['sha256']}":
             checks.append(f"locked `{filename}` does not match PyPI's URL and sha256")
             status = "fail"
+            continue
+        data = http_get(real["url"])
+        if hashlib.sha256(data).hexdigest() != real["digests"]["sha256"]:
+            checks.append(f"downloaded `{filename}` does not match its sha256")
+            status = "fail"
+            continue
+        attested[filename] = pypi_provenance(change.name, change.new, filename)
+        key = dist_key(filename, change.new)
+        old_file = old_served.get(key)
+        old_data = http_get(old_file["url"]) if old_file else None
+        if old_file and hashlib.sha256(old_data).hexdigest() != old_file["digests"]["sha256"]:
+            checks.append(f"downloaded previous `{old_file['filename']}` does not match its sha256")
+            status = "fail"
+        artifacts.append((key, old_data, data, "zip" if filename.endswith(".whl") else "tar"))
     if status == "pass":
-        checks.append(f"all {len(locked)} locked distributions are PyPI's files with PyPI's sha256")
-    new_data = http_get(new_file["url"])
-    if hashlib.sha256(new_data).hexdigest() != new_file["digests"]["sha256"]:
-        checks.append("downloaded file does not match the PyPI sha256 digest")
+        checks.append(f"all {len(locked)} locked distributions are PyPI's files, downloaded with PyPI's sha256")
+    # Attestation per file: a release built by trusted publishing attests
+    # every file it uploads, so a file without one next to files with one
+    # was uploaded some other way.
+    with_attestation = sorted(f for f, publishers in attested.items() if publishers)
+    without = sorted(f for f, publishers in attested.items() if not publishers)
+    if with_attestation and without:
+        checks.append(f"{len(without)} of {len(attested)} files have no PEP 740 attestation: {', '.join(without)}")
         status = "fail"
+    publishers = sorted({p for f in with_attestation for p in attested[f]})
     repo = pypi_source(meta)
-    publishers = pypi_provenance(change.name, change.new, new_file["filename"])
-    old_meta = try_json(f"https://pypi.org/pypi/{change.name}/{change.old}/json") if change.old else None
-    old_file = pypi_file(old_meta) if old_meta else None
+    old_file = old_served.get("sdist") or next(iter(old_served.values()), None)
     if publishers:
         if repo and repo not in publishers:
             checks.append(f"PEP 740 attestation publisher {publishers} is not the project's source {repo}")
             status = "fail"
         else:
-            checks.append(f"PEP 740 attestation by trusted publisher {publishers[0]} (sigstore bundle not verified here)")
+            checks.append(f"every file has a PEP 740 attestation by trusted publisher {publishers[0]} "
+                          "(sigstore bundle not verified here)")
             repo = repo or publishers[0]
     elif old_file and pypi_provenance(change.name, change.old, old_file["filename"]):
         checks.append(f"{change.old} had a PEP 740 attestation, {change.new} has none")
@@ -824,17 +858,13 @@ def review_pypi(change: Change, base: Path, head: Path):
             checks.append(f"no PEP 740 attestation; upstream tag `{found[0]}` exists in {repo}")
         else:
             checks.append(f"no PEP 740 attestation and no release tag for {change.new} in {repo}")
-            status = "unverifiable"
+            status = "unverifiable" if status == "pass" else status
     else:
         checks.append("no PEP 740 attestation and no GitHub source URL")
-        status = "unverifiable"
-    old_data = http_get(old_file["url"]) if old_file else None
-    kind = "zip" if new_file["filename"].endswith(".whl") else "tar"
-    if old_file and old_file["filename"].endswith(".whl") != new_file["filename"].endswith(".whl"):
-        old_data = None
-    artifacts = (old_data, new_data, kind)
+        status = "unverifiable" if status == "pass" else status
     found = find_tag(repo, change.name, change.new) if repo else None
-    return artifacts, result(status, checks, repository=repo, file=new_file["filename"]), release_notes(repo, [found[0]] if found else [])
+    return (artifacts or None), result(status, checks, repository=repo, files=sorted(attested)), \
+        release_notes(repo, [found[0]] if found else [])
 
 
 def review_unhandled(change: Change, base: Path, head: Path):
@@ -871,18 +901,39 @@ def collect(base: Path, head: Path, out: Path) -> dict:
         # blocks the PR, whatever the verdict.
         blockers: list[str] = []
         if artifacts:
-            old_bytes, new_bytes, kind = artifacts
-            if old_bytes is None:
-                (folder / "old").mkdir(parents=True, exist_ok=True)
-                if change.old is None:
-                    entry["baseline"] = "empty: new dependency, its whole published artifact is the change"
+            parts = artifacts if isinstance(artifacts, list) else [("", *artifacts)]
+            if change.old is None:
+                entry["baseline"] = "empty: new dependency, its whole published artifact is the change"
+            chunks, seen = [], {}
+            for label, old_bytes, new_bytes, kind in parts:
+                where = folder / label if label else folder
+                if old_bytes is None:
+                    (where / "old").mkdir(parents=True, exist_ok=True)
+                    if change.old is not None and not label:
+                        blockers.append(f"the previous `{change.old}` cannot be fetched as an exact artifact "
+                                        "(not a commit SHA), so the change cannot be diffed")
+                    elif change.old is not None:
+                        entry.setdefault("new_distributions", []).append(label)
                 else:
-                    blockers.append(f"the previous `{change.old}` cannot be fetched as an exact artifact "
-                                    "(not a commit SHA), so the change cannot be diffed")
-            else:
-                unpack(old_bytes, kind, folder / "old")
-            unpack(new_bytes, kind, folder / "new")
-            patch = diff_trees(folder / "old", folder / "new").encode()
+                    unpack(old_bytes, kind, where / "old")
+                unpack(new_bytes, kind, where / "new")
+                text = diff_trees(where / "old", where / "new")
+                if label:
+                    # Wheels of one release mostly repeat the same files: a
+                    # file change already shown for another distribution is
+                    # named, not repeated.
+                    kept = []
+                    for block in re.split(r"(?m)^(?=diff -ruN )", text):
+                        digest = hashlib.sha256(re.sub(r"(?m)^(diff -ruN|---|\+\+\+) .*$", "", block).encode()).hexdigest()
+                        if block.strip() and digest in seen:
+                            first = block.splitlines()[0] if block else ""
+                            kept.append(f"{first}\n(same change as in distribution {seen[digest]})\n")
+                        else:
+                            seen.setdefault(digest, label)
+                            kept.append(block)
+                    text = f"### distribution {label}\n" + "".join(kept)
+                chunks.append(text)
+            patch = "".join(chunks).encode()
             entry["flags"] = scan_patch(patch.decode(errors="replace"))
             entry["diff_bytes"] = len(patch)
             if len(patch) > MAX_PATCH_BYTES:

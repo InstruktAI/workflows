@@ -35,7 +35,7 @@ jobs:
       - name: Collect the fixture updates
         run: |
           set -euo pipefail
-          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha; do
+          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna; do
             python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
               --out "$RUNNER_TEMP/$fixture"
           done
@@ -73,6 +73,13 @@ jobs:
           check action-new '.dependencies[0].from == null and (.dependencies[0].baseline | startswith("empty")) and .dependencies[0].diff_bytes > 0'
           check action-tag-to-sha 'any(.dependencies[0].review_blockers[]; contains("cannot be fetched as an exact artifact"))'
           check capped 'any(.dependencies[] | select(.name == "time") | .review_blockers[]; contains("over the 1000-byte review cap"))'
+          # PyPI: every distribution uv.lock records is downloaded, attested
+          # and diffed on its own, the wheel as well as the sdist.
+          check pypi-idna '.dependencies[0] | .provenance.status == "pass"
+            and .provenance.files == ["idna-3.20-py3-none-any.whl", "idna-3.20.tar.gz"]
+            and any(.provenance.checks[]; startswith("every file has a PEP 740 attestation"))'
+          grep -q '^### distribution sdist' "$RUNNER_TEMP"/pypi-idna/*/diff.patch
+          grep -q '^### distribution wheel-py3-none-any' "$RUNNER_TEMP"/pypi-idna/*/diff.patch
           for fixture in crate-time action-release action-bad-sha action-reused-sha; do check "$fixture" '.unsupported_files == []'; done
 
       - name: The bundle manifest covers hidden files and catches a missing one
