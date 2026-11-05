@@ -268,23 +268,37 @@ def changed_files(base: Path, head: Path) -> list[str]:
     return sorted(rel for rel in set(old) | set(new) if old.get(rel) != new.get(rel))
 
 
+def per_file(found: dict[tuple[str, str], dict[str, set]]) -> dict[tuple[str, str, str], dict[str, str | None]]:
+    """{(ecosystem, name, file): {version_or_ref: comment}}"""
+    out: dict[tuple[str, str, str], dict[str, str | None]] = {}
+    for (ecosystem, name), versions in found.items():
+        for version, places in versions.items():
+            for comment, rel in places:
+                slot = out.setdefault((ecosystem, name, rel), {})
+                slot[version] = slot.get(version) or comment
+    return out
+
+
 def detect(base: Path, head: Path) -> tuple[list[Change], list[str]]:
-    old_all, new_all = read_versions(base), read_versions(head)
-    changes = []
+    """Updates are found per file: a version added to one lockfile or
+    workflow is an update even when another file already used it."""
+    old_all, new_all = per_file(read_versions(base)), per_file(read_versions(head))
+    merged: dict[tuple[str, str, str | None, str], Change] = {}
     for key, new_versions in sorted(new_all.items()):
-        ecosystem, name = key
+        ecosystem, name, rel = key
         old_versions = old_all.get(key, {})
         added = sorted(set(new_versions) - set(old_versions))
         removed = sorted(set(old_versions) - set(new_versions))
         for version in added:
             old = removed[0] if len(removed) == 1 else None
-            comment = sorted(c for c, _ in new_versions[version] if c) or [None]
-            old_comment = sorted(c for c, _ in old_versions.get(old, set()) if c) or [None] if old else [None]
-            changes.append(Change(ecosystem, name, old, version,
-                                  old_comment=old_comment[0], new_comment=comment[0],
-                                  files=sorted({f for _, f in new_versions[version]})))
+            ident = (ecosystem, name, old, version)
+            if ident not in merged:
+                merged[ident] = Change(ecosystem, name, old, version,
+                                       old_comment=old_versions.get(old) if old else None,
+                                       new_comment=new_versions[version])
+            merged[ident].files.append(rel)
     unsupported = [rel for rel in changed_files(base, head) if UNSUPPORTED.search(rel)]
-    return changes, unsupported
+    return list(merged.values()), unsupported
 
 
 # --------------------------------------------------------------------------
@@ -341,7 +355,7 @@ FLAG_PATTERNS = {
     ),
     "env-or-secrets": re.compile(
         r"(process\.env|os\.environ|os\.getenv|std::env::var|env::var|getenv\(|GITHUB_TOKEN|NPM_TOKEN|"
-        r"ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN|AWS_[A-Z_]+|\.ssh/|id_rsa|\.npmrc|\.pypirc|"
+        r"ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN|github\.token|AWS_[A-Z_]+|\.ssh/|id_rsa|\.npmrc|\.pypirc|"
         r"\.git-credentials|credentials|secrets\.)"
     ),
     "encoded-or-obfuscated": re.compile(
