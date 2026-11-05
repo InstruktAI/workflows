@@ -61,9 +61,11 @@ UNSUPPORTED = re.compile(
     r"\.tool-versions|\.nvmrc|\.python-version|rust-toolchain(\.toml)?)$"
 )
 WORKFLOW_FILE = re.compile(r"(^|/)(\.github/workflows/[^/]+|action)\.ya?ml$")
+# Any `uses:` value, block or flow style; it is classified afterwards, so a
+# value that is not a reviewable owner/repo@ref is blocked, never skipped.
 USES = re.compile(
-    r"""^\s*-?\s*uses:\s*['"]?(?P<target>[^@\s'"#]+)@(?P<ref>[^\s'"#]+)['"]?"""
-    r"""(?:\s*#\s*(?P<comment>\S+))?""",
+    r"""(?:^|[\s{,])uses\s*:\s*['"]?(?P<value>[^\s'"#,}\]]+)['"]?"""
+    r"""(?:[\s},\]]*#\s*(?P<comment>\S+))?""",
     re.MULTILINE,
 )
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -234,14 +236,24 @@ def read_pins(root: Path) -> dict[tuple[str, str, str], list[dict]]:
     def add(ecosystem: str, name: str, rel: str, pin: dict):
         found.setdefault((ecosystem, name, rel), []).append(pin)
 
+    def unhandled(rel: str, what: str, entry: object):
+        """An entry this review cannot check: recorded so that adding or
+        changing it blocks instead of vanishing."""
+        add("unhandled", what, rel, {"version": hashlib.sha256(
+            json.dumps(entry, sort_keys=True, default=str).encode()).hexdigest()[:16], "entry": entry})
+
     for rel, path in walk(root):
         base = path.name
         try:
             if base == "Cargo.lock":
                 for package in tomllib.loads(path.read_text()).get("package", []):
-                    if package.get("source") in CRATES_IO_SOURCES:
+                    source = package.get("source")
+                    if source in CRATES_IO_SOURCES:
                         add("crate", package["name"], rel, {"version": package["version"],
-                            "source": package["source"], "checksum": package.get("checksum")})
+                            "source": source, "checksum": package.get("checksum")})
+                    elif source:
+                        # git sources and alternate registries
+                        unhandled(rel, f"crate {package['name']} from {source}", package)
             elif base == "uv.lock":
                 for package in tomllib.loads(path.read_text()).get("package", []):
                     source = package.get("source") or {}
@@ -249,26 +261,54 @@ def read_pins(root: Path) -> dict[tuple[str, str, str], list[dict]]:
                         add("pypi", package["name"].lower(), rel, {"version": package["version"],
                             "source": source["registry"], "sdist": uv_dist(package.get("sdist")),
                             "wheels": sorted((uv_dist(w) for w in package.get("wheels", [])), key=lambda w: w["url"] or "")})
+                    elif set(source) & {"registry", "git", "url"} or not source:
+                        unhandled(rel, f"python package {package['name']} from {source or 'an unknown source'}", package)
+                    # editable, directory, path and virtual sources are this
+                    # repository's own code, reviewed with the PR itself.
             elif base in ("package-lock.json", "npm-shrinkwrap.json"):
                 data = json.loads(path.read_text())
-                for key, package in (data.get("packages") or {}).items():
-                    if not key or package.get("link") or "version" not in package:
-                        continue
-                    resolved = package.get("resolved") or ""
-                    if resolved and not resolved.startswith(NPM_REGISTRY):
+                if "packages" not in data:
+                    unhandled(rel, f"npm lockfile v{data.get('lockfileVersion', 1)} (only v2 and v3 are reviewed)", data)
+                    continue
+                for key, package in data["packages"].items():
+                    if not key or package.get("link") or package.get("inBundle"):
+                        # the root, workspace links, and files shipped inside
+                        # their parent's tarball (reviewed with the parent)
                         continue
                     name = package.get("name") or key.rsplit("node_modules/", 1)[-1]
-                    add("npm", name, rel, {"version": package["version"], "resolved": package.get("resolved"),
+                    resolved = package.get("resolved")
+                    if resolved and resolved.startswith("file:"):
+                        continue
+                    if "version" not in package or not resolved or not resolved.startswith(NPM_REGISTRY):
+                        unhandled(rel, f"npm package {name} from {resolved or 'no resolved URL'}", package)
+                        continue
+                    add("npm", name, rel, {"version": package["version"], "resolved": resolved,
                                            "integrity": package.get("integrity")})
             elif base == "pnpm-lock.yaml":
-                for name, version, resolution in pnpm_packages(path.read_text()):
-                    add("npm", name, rel, {"version": version, "integrity": resolution.get("integrity")})
+                text = path.read_text()
+                version = re.search(r"^lockfileVersion:\s*'?([^'\s]+)", text, re.MULTILINE)
+                if not version or version[1] != "9.0":
+                    unhandled(rel, f"pnpm lockfile version {version[1] if version else 'unknown'} (only 9.0 is reviewed)", text)
+                    continue
+                for name, version_, resolution, raw in pnpm_packages(text):
+                    if name is None:
+                        unhandled(rel, "pnpm packages entry this review cannot parse", raw)
+                    elif set(resolution) == {"integrity"}:
+                        add("npm", name, rel, {"version": version_, "integrity": resolution["integrity"]})
+                    elif resolution.get("type") == "directory":
+                        continue
+                    else:
+                        unhandled(rel, f"npm package {name} from {resolution}", raw)
             elif WORKFLOW_FILE.search(rel):
                 for match in USES.finditer(path.read_text()):
-                    target = match["target"]
-                    if target.startswith(("./", "docker://")):
+                    value = match["value"]
+                    if value.startswith("./"):
                         continue
-                    add("action", target, rel, {"version": match["ref"], "comment": match["comment"]})
+                    target, at, ref = value.partition("@")
+                    if value.startswith("docker://") or not at or not re.match(r"^[\w.-]+/[\w.-]+", target):
+                        unhandled(rel, f"action `{value}`", {"uses": value, "comment": match["comment"]})
+                        continue
+                    add("action", target, rel, {"version": ref, "comment": match["comment"]})
         except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as error:
             raise SystemExit(f"cannot parse {rel}: {error}")
     return found
@@ -279,29 +319,36 @@ PNPM_RESOLUTION = re.compile(r"^    resolution:\s*\{(.*)\}\s*$")
 
 
 def pnpm_packages(text: str):
-    """(name, version, resolution) for each entry of a pnpm lockfile's
-    `packages:` section; resolution is the parsed `{integrity: ...}` or
-    `{tarball: ...}` mapping."""
+    """(name, version, resolution, raw) for each entry of a pnpm v9
+    lockfile's `packages:` section; resolution is the parsed `{integrity:
+    ...}`, `{tarball: ...}` or `{type: ..., ...}` mapping. An entry whose key
+    or resolution cannot be parsed comes back with name None."""
     in_packages, current = False, None
     for line in text.splitlines():
         if re.match(r"^\S", line):
+            if current:
+                yield None, None, {}, current
             in_packages = line.rstrip() == "packages:"
             current = None
             continue
-        if not in_packages:
+        if not in_packages or not line.strip():
             continue
-        key = PNPM_KEY.match(line)
-        if key:
-            current = (key[1], key[2])
+        if re.match(r"^  \S", line):
+            if current:
+                yield None, None, {}, current
+            key = PNPM_KEY.match(line)
+            current = (key[1], key[2]) if key else line
             continue
-        res = current and PNPM_RESOLUTION.match(line)
-        if res:
+        res = PNPM_RESOLUTION.match(line)
+        if res and isinstance(current, tuple):
             resolution = dict(
                 (k.strip(), v.strip().strip("'\""))
                 for k, _, v in (part.partition(":") for part in res[1].split(","))
             )
-            yield current[0], current[1], resolution
+            yield current[0], current[1], resolution, line
             current = None
+    if current:
+        yield None, None, {}, current
 
 
 def changed_files(base: Path, head: Path) -> list[str]:
@@ -784,7 +831,12 @@ def review_pypi(change: Change, base: Path, head: Path):
     return artifacts, result(status, checks, repository=repo, file=new_file["filename"]), release_notes(repo, [found[0]] if found else [])
 
 
-REVIEWERS = {"action": review_action, "crate": review_crate, "npm": review_npm, "pypi": review_pypi}
+def review_unhandled(change: Change, base: Path, head: Path):
+    return None, result("fail", [f"unhandled dependency entry, not reviewed: {change.name}"]), ""
+
+
+REVIEWERS = {"action": review_action, "crate": review_crate, "npm": review_npm, "pypi": review_pypi,
+             "unhandled": review_unhandled}
 
 
 # --------------------------------------------------------------------------

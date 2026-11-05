@@ -35,7 +35,7 @@ jobs:
       - name: Collect the fixture updates
         run: |
           set -euo pipefail
-          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap; do
+          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled; do
             python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
               --out "$RUNNER_TEMP/$fixture"
           done
@@ -58,6 +58,14 @@ jobs:
           check crate-checksum-swap '.dependencies | length == 1 and .[0].provenance.status == "fail" and any(.[0].provenance.checks[]; contains("is not the reviewed crates.io artifact"))'
           # shellcheck disable=SC2016
           check pypi-hash-swap '.dependencies | length == 1 and .[0].provenance.status == "fail" and any(.[0].provenance.checks[]; contains("does not match PyPI"))'
+          # Every entry it cannot review is blocked by name, next to the
+          # supported (flow-style) action bump, which is still reviewed.
+          check unhandled '[.dependencies[] | select(.ecosystem == "action") | .provenance.status] == ["pass"]'
+          # shellcheck disable=SC2016 # the backticks are literal text
+          check unhandled '[.dependencies[] | select(.ecosystem == "unhandled" and .provenance.status == "fail") | .name]
+            | (any(startswith("crate serde-git from git+")) and any(startswith("python package fromgit"))
+               and any(startswith("npm package evil from https://example.invalid")) and any(startswith("npm lockfile v1"))
+               and any(. == "action `docker://alpine:3`"))'
           for fixture in crate-time action-release action-bad-sha action-reused-sha; do check "$fixture" '.unsupported_files == []'; done
 
       - name: The bundle manifest covers hidden files and catches a missing one

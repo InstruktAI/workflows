@@ -232,8 +232,18 @@ Known limits: minified or bundled code (an action's `dist/`, a minified npm
 build) cannot be reviewed reliably; for ordinary updates the 3-day release age
 is the backstop, and advisory fixes skip it. Actions pinned to a branch rather
 than a release (`# master`, `# stable`) fail provenance and wait for a human.
-Docker images, Go modules, `yarn.lock` and other ecosystems are not reviewed;
-a PR changing them fails closed.
+What is reviewed: GitHub Actions `uses:` in workflow and `action.yml` files
+(block or flow style), crates.io entries of `Cargo.lock`, PyPI entries of
+`uv.lock`, and default-registry entries of npm v2/v3 `package-lock.json` and
+pnpm 9 `pnpm-lock.yaml`. Every other added or changed entry in those files
+is blocked by name as unhandled: Cargo git sources and alternate registries,
+uv git, URL and non-PyPI registry sources, npm entries resolved anywhere but
+`registry.npmjs.org`, npm v1 lockfiles, other pnpm lockfile versions and
+resolutions, `docker://` actions. Changes to `go.sum`, `yarn.lock`,
+`poetry.lock`, `Pipfile.lock`, `requirements*.txt`, Dockerfiles and toolchain
+pins (`.nvmrc`, `rust-toolchain`, ...) block too. Repository-local entries
+(path, editable, workspace members, `./` actions) are part of the PR itself
+and are not treated as dependencies.
 
 ## Releasing this repository
 
