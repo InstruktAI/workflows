@@ -63,13 +63,8 @@ UNSUPPORTED = re.compile(
     r"\.tool-versions|\.nvmrc|\.python-version|rust-toolchain(\.toml)?)$"
 )
 WORKFLOW_FILE = re.compile(r"(^|/)(\.github/workflows/[^/]+|action)\.ya?ml$")
-# Any `uses:` value, block or flow style; it is classified afterwards, so a
-# value that is not a reviewable owner/repo@ref is blocked, never skipped.
-USES = re.compile(
-    r"""(?:^|[\s{,])uses\s*:\s*['"]?(?P<value>[^\s'"#,}\]]+)['"]?"""
-    r"""(?:[\s},\]]*#\s*(?P<comment>\S+))?""",
-    re.MULTILINE,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow_uses import Unparseable, workflow_uses  # noqa: E402
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -336,15 +331,23 @@ def read_pins(root: Path) -> dict[tuple[str, str, str], list[dict]]:
                     else:
                         unhandled(rel, f"npm package {name} from {resolution}", raw)
             elif WORKFLOW_FILE.search(rel):
-                for match in USES.finditer(path.read_text()):
-                    value = match["value"]
-                    if value.startswith("./"):
+                # Every `uses` node of the parsed file, however its key is
+                # quoted or its mapping styled; anything that is not a
+                # reviewable owner/repo@ref blocks, never vanishes.
+                try:
+                    nodes = workflow_uses(path)
+                except Unparseable as error:
+                    unhandled(rel, f"workflow file that cannot be parsed ({error})", path.read_text())
+                    continue
+                for value, comment in nodes:
+                    if isinstance(value, str) and value.startswith("./"):
                         continue
-                    target, at, ref = value.partition("@")
-                    if value.startswith("docker://") or not at or not re.match(r"^[\w.-]+/[\w.-]+", target):
-                        unhandled(rel, f"action `{value}`", {"uses": value, "comment": match["comment"]})
+                    target, at, ref = value.partition("@") if isinstance(value, str) else ("", "", "")
+                    if (not isinstance(value, str) or value.startswith("docker://") or not at
+                            or not re.match(r"^[\w.-]+/[\w.-]+", target)):
+                        unhandled(rel, f"action `{value}`", {"uses": value, "comment": comment})
                         continue
-                    add("action", target, rel, {"version": ref, "comment": match["comment"]})
+                    add("action", target, rel, {"version": ref, "comment": comment})
         except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as error:
             raise SystemExit(f"cannot parse {rel}: {error}")
     return found

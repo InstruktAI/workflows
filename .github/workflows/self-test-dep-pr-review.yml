@@ -40,7 +40,7 @@ jobs:
       - name: Collect the fixture updates
         run: |
           set -euo pipefail
-          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna npm-branch-build action-many-to-one; do
+          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna npm-branch-build action-many-to-one quoted-uses; do
             python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
               --out "$RUNNER_TEMP/$fixture"
           done
@@ -103,6 +103,11 @@ jobs:
           for id in $(jq -r '.dependencies[].id' "$RUNNER_TEMP/action-many-to-one/summary.json"); do
             test -d "$RUNNER_TEMP/action-many-to-one/$id/old"
           done
+          # uses nodes come from parsed YAML: quoted keys and flow mappings
+          # count, the checkout bump is reviewed and both docker actions block.
+          check quoted-uses '[.dependencies[] | select(.ecosystem == "action") | .provenance.status] == ["pass"]'
+          # shellcheck disable=SC2016
+          check quoted-uses '[.dependencies[] | select(.ecosystem == "unhandled") | .name] | sort == ["action `docker://alpine:3`", "action `docker://busybox:1`"]'
           for fixture in crate-time action-release action-bad-sha action-reused-sha; do check "$fixture" '.unsupported_files == []'; done
 
       - name: The bundle manifest covers hidden files and catches a missing one
