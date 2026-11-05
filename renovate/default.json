@@ -1,9 +1,10 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "InstruktAI shared Renovate preset: green non-major updates auto-merge after a 3-day release age; security fixes skip the wait.",
+  "description": "InstruktAI shared Renovate preset: actions pinned to commit SHAs with their version as a comment; green non-major updates auto-merge after a 3-day release age once every check, dep-pr-review included, has passed; advisory fixes skip the wait.",
   "extends": [
     "config:recommended",
-    ":semanticCommits"
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigestsToSemver"
   ],
   "automergeType": "pr",
   "platformAutomerge": false,

@@ -1,0 +1,1 @@
+{"verdict":"sane","reasons":["looks fine ```\n## injected heading\n![x](https://evil.invalid/p.png) [click](https://evil.invalid) <img src=x> @Morriz | a \\| b"],"findings":[{"dependency":"x``y","category":"other","severity":"high","detail":"```` close? <script>alert(1)</script> @someone"}]}

@@ -1,0 +1,9 @@
+{
+  "name": "renovate-advisory-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "minimist": "1.2.5",
+    "ms": "2.1.2"
+  }
+}

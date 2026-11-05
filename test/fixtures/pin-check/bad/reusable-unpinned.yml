@@ -1,0 +1,4 @@
+on: push
+jobs:
+  a:
+    uses: InstruktAI/workflows/.github/workflows/ci-node.yml@v1

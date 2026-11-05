@@ -1,0 +1,6 @@
+on: push
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@28802689a136bfcdb721715abd713740beecbe07 # v7.0.1
