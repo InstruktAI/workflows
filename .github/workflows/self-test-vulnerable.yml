@@ -1,0 +1,41 @@
+name: self-test-vulnerable
+
+# Negative test, throwaway branches only: every job here must FAIL. The
+# fixtures live on the PR's base; this PR changes only this file. Each call
+# leaves on only the gate under test, so a red job proves that gate fails.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  osv-base-present-malicious:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/uv-malicious
+      dependency-review: never
+      pip-audit: false
+
+  pip-audit-strict-removed-malicious:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/uv-malicious
+      dependency-review: never
+      osv-scanner: false
+
+  pip-audit-workspace-member:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/uv-workspace
+      dependency-review: never
+      osv-scanner: false
+
+  msrv-virtual-member:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/vulnerable/cargo-msrv
+      dependency-review: never
+      osv-scanner: false
+      cargo-deny: false
