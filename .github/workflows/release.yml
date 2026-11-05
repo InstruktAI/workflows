@@ -1,0 +1,98 @@
+name: release
+
+# Releases this repository: creates the immutable tag vX.Y.Z on main and
+# moves the floating major tag vX to it, in one atomic push, then publishes a
+# GitHub Release for vX.Y.Z.
+#
+# Tags matching refs/tags/v* are protected by a tag ruleset that only deploy
+# keys may bypass (see README "Releasing"). The push therefore goes over SSH
+# with the release deploy key, which lives only in the `release` environment.
+# That environment admits main only, and its secrets reach only jobs that
+# reference it and pass its protection rules
+# (docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments),
+# so a workflow on any other branch cannot obtain the key.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, vX.Y.Z
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Validate the version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must look like v1.2.3, got '$VERSION'"
+            exit 1
+          fi
+          echo "major=v${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Require the release key
+        env:
+          KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::the release environment has no RELEASE_DEPLOY_KEY secret; see README \"Releasing\""
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+
+      - name: Tag vX.Y.Z and move vX
+        env:
+          VERSION: ${{ inputs.version }}
+          MAJOR: ${{ steps.version.outputs.major }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet --force --tags origin
+          if git rev-parse --verify --quiet "refs/tags/$VERSION" > /dev/null; then
+            echo "::error::$VERSION already exists; release tags are immutable"
+            exit 1
+          fi
+          latest=$(git tag --list 'v*.*.*' --sort=-version:refname | head -n 1)
+          if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "$latest" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ]; then
+            echo "::error::$VERSION is not newer than the latest release $latest"
+            exit 1
+          fi
+          previous=$(git rev-parse --verify --quiet "refs/tags/$MAJOR^{commit}" || true)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "$VERSION" "$GITHUB_SHA"
+          git tag -f "$MAJOR" "$GITHUB_SHA"
+          # Leases: the new tag must not exist yet, and the major tag must
+          # still be where this run read it. Atomic: both move or neither.
+          git push --atomic \
+            "--force-with-lease=refs/tags/$VERSION:" \
+            "--force-with-lease=refs/tags/$MAJOR:$previous" \
+            origin "refs/tags/$VERSION" "refs/tags/$MAJOR"
+          echo "::notice::$VERSION and $MAJOR now point to $GITHUB_SHA (previously ${previous:-unset})"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: gh release create "$VERSION" --verify-tag --title "$VERSION" --generate-notes
