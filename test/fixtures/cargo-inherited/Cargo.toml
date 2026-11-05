@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/member"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[package]
+name = "deps-audit-inherited"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false

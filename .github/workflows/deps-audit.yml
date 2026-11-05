@@ -56,8 +56,11 @@ on:
         description: "'true' when Cargo.toml was found"
         value: ${{ jobs.detect.outputs.cargo }}
       msrv:
-        description: The rust-version declared in Cargo.toml, empty when none
+        description: Distinct rust-versions declared by the Cargo workspace members, space-separated and sorted; empty when none
         value: ${{ jobs.detect.outputs.msrv }}
+      msrv-matrix:
+        description: "JSON list of {rust-version, args}: the cargo check package selection run on each declared rust-version"
+        value: ${{ jobs.detect.outputs.msrv-matrix }}
       python:
         description: "'uv' when pyproject.toml and uv.lock were found"
         value: ${{ jobs.detect.outputs.python }}
@@ -75,6 +78,7 @@ jobs:
     outputs:
       cargo: ${{ steps.detect.outputs.cargo }}
       msrv: ${{ steps.detect.outputs.msrv }}
+      msrv-matrix: ${{ steps.detect.outputs.msrv-matrix }}
       python: ${{ steps.detect.outputs.python }}
       node: ${{ steps.detect.outputs.node }}
     steps:
@@ -86,10 +90,25 @@ jobs:
         name: Detect ecosystems
         working-directory: ${{ inputs.working-directory }}
         run: |
-          cargo=false msrv='' python='' node=''
+          cargo=false msrv='' msrv_matrix='[]' python='' node=''
           if [ -f Cargo.toml ]; then
             cargo=true
-            msrv=$(sed -nE 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n 1)
+            # Cargo resolves every member's rust-version, inherited or quoted
+            # any way. `+stable` so a rust-toolchain.toml is not needed yet.
+            # One cargo check per distinct rust-version: the whole workspace
+            # when every member declares the same one, else just the members
+            # that declare it.
+            msrv_matrix=$(cargo +stable metadata --format-version 1 --no-deps --manifest-path Cargo.toml | jq -c '
+              (.packages | length) as $total
+              | [.packages[] | select(.rust_version != null) | {v: .rust_version, n: .name}]
+              | group_by(.v) as $groups
+              | $groups | map({
+                  "rust-version": .[0].v,
+                  args: (if ($groups | length) == 1 and length == $total
+                         then "--workspace"
+                         else (map("-p " + .n) | join(" ")) end)
+                })')
+            msrv=$(jq -r 'map(.["rust-version"]) | join(" ")' <<< "$msrv_matrix")
           fi
           if [ -f pyproject.toml ]; then
             # pip-audit audits the locked set; an unlocked project fails closed.
@@ -104,6 +123,7 @@ jobs:
           {
             echo "cargo=$cargo"
             echo "msrv=$msrv"
+            echo "msrv-matrix=$msrv_matrix"
             echo "python=$python"
             echo "node=$node"
           } >> "$GITHUB_OUTPUT"
@@ -251,10 +271,14 @@ jobs:
           command-arguments: ${{ steps.config.outputs.args }}
 
   msrv:
-    name: msrv
+    name: msrv ${{ matrix.rust-version }}
     needs: detect
     if: needs.detect.outputs.msrv != '' && inputs.msrv
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.detect.outputs.msrv-matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -262,14 +286,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
         with:
-          toolchain: ${{ needs.detect.outputs.msrv }}
+          toolchain: ${{ matrix.rust-version }}
 
       - name: cargo check on the declared rust-version
         working-directory: ${{ inputs.working-directory }}
         env:
-          MSRV: ${{ needs.detect.outputs.msrv }}
+          MSRV: ${{ matrix.rust-version }}
+          PACKAGES: ${{ matrix.args }}
         # `+toolchain` wins over a rust-toolchain.toml in the repo.
-        run: cargo "+$MSRV" check --workspace --all-targets --locked
+        run: |
+          read -ra packages <<< "$PACKAGES"
+          cargo "+$MSRV" check "${packages[@]}" --all-targets --locked
 
   pip-audit:
     name: pip-audit
