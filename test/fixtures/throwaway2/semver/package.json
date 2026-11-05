@@ -2,5 +2,5 @@
   "name": "dep-pr-review-semver",
   "version": "0.1.0",
   "private": true,
-  "dependencies": { "semver": "7.7.2" }
+  "dependencies": { "semver": "7.7.3" }
 }
