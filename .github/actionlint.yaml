@@ -1,0 +1,9 @@
+# actionlint configuration.
+paths:
+  .github/workflows/deps-audit.yml:
+    ignore:
+      # job.workflow_repository and job.workflow_sha are GitHub job-context
+      # properties newer than actionlint's context model (1.7.12). They are
+      # populated at run time; deps-audit fails closed when either is empty,
+      # and self-test exercises that path.
+      - 'property "workflow_(repository|sha)" is not defined'
