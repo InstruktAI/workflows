@@ -84,8 +84,11 @@ and digest updates auto-merge with `automergeType: "pr"` and
 check and check run on the PR is green (no branch protection needed); majors
 never auto-merge; non-security updates wait `minimumReleaseAge: "3 days"`,
 vulnerability fixes skip the wait and get the `security` label; lock file
-maintenance runs weekly and is left for a human, since it has no release
-timestamp to age. Vulnerability PRs need the repo's Dependabot alerts on.
+maintenance is off: it would move every transitive dependency to brand-new
+versions with no release age to wait for, which is the window malicious
+releases use. Transitive dependencies move with their direct dependency, and
+vulnerable ones get vulnerability PRs. Those need the repo's Dependabot alerts
+on.
 
 ## Not here on purpose
 
