@@ -1,0 +1,6 @@
+{
+  "name": "deps-audit-vulnerable",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": { "minimist": "1.2.5" }
+}
