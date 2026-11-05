@@ -3,4 +3,4 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: InstruktAI/workflows/test/fixtures/throwaway/evil-action@486365cacb00da6c7c20645971535d36b15b6062
+      - uses: InstruktAI/workflows/test/fixtures/throwaway/evil-action@4d95813a4588f15c257aa29ad6012f956f99eb15
