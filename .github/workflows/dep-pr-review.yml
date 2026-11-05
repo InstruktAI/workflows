@@ -164,6 +164,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           github_token: ${{ github.token }}
+          # checkHumanActor rejects any non-User actor not listed here; the
+          # list is matched with "[bot]" stripped (src/github/validation/
+          # actor.ts at this commit). Only Renovate.
+          allowed_bots: renovate
           display_report: false
           prompt: |
             Follow scripts/dep-pr-review/prompt.md exactly. The bundle to review is in bundle/.

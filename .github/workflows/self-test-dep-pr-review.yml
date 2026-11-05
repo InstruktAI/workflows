@@ -105,6 +105,37 @@ jobs:
             && [ "$unverifiable" = 1 ] && grep -q 'provenance could not be verified' unverifiable.md \
             && ! grep -q 'Passed' unverifiable.md
 
+  # The pinned claude-code-action's own actor check accepts renovate[bot]
+  # with the allowed_bots value dep-pr-review.yml passes, and nothing else.
+  allowed-bots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: pin
+        name: Read the action pin and allowed_bots from dep-pr-review.yml
+        run: |
+          set -euo pipefail
+          step='.jobs.review.steps[] | select(.id == "review")'
+          uses=$(yq "$step | .uses" .github/workflows/dep-pr-review.yml)
+          echo "sha=${uses##*@}" >> "$GITHUB_OUTPUT"
+          echo "allowed=$(yq "$step | .with.allowed_bots" .github/workflows/dep-pr-review.yml)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: anthropics/claude-code-action
+          ref: ${{ steps.pin.outputs.sha }}
+          path: cca
+          persist-credentials: false
+      # The Bun version the action itself installs (its action.yml).
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: checkHumanActor accepts renovate[bot] only
+        env:
+          ALLOWED: ${{ steps.pin.outputs.allowed }}
+        run: bun run test/dep-pr-review/allowed-bots.ts "$PWD/cca/src/github/validation/actor.ts" "$ALLOWED"
+
   # Untrusted values (names, versions, checks, the model's text) must render
   # as literal text: hostile input full of links, images, HTML, mentions and
   # fence-breaking backticks leaves no active markup outside code.
