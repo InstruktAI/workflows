@@ -58,7 +58,8 @@ jobs:
 
       - name: The outcome gate blocks on provenance and passes a sane verdict
         run: |
-          set -uo pipefail
+          # The default shell runs with -e; the exit codes are what is tested.
+          set +e -uo pipefail
           python3 -I "$TOOL/report.py" --name t --collect success --review skipped \
             --summary "$RUNNER_TEMP/action-bad-sha/summary.json" --out blocked.md > /dev/null
           blocked=$?
@@ -109,10 +110,13 @@ jobs:
         run: |
           set -euo pipefail
           jq '[.. | objects | select(has("depName") and (.depName == "minimist" or .depName == "ms")) | {depName, currentVersion, updates}]' "$RUNNER_TEMP/report.json" | tee deps.json
-          # minimist 1.2.5 has GHSA-xvch-5gv4-984h, fixed in 1.2.6
-          jq -e '[.[] | select(.depName == "minimist") | .updates[] | select(.isVulnerabilityAlert == true and .newVersion != null and ((.pendingChecks // false) | not))] | length > 0' deps.json
-          # ms 2.1.2 -> 2.1.3 is an ordinary update and is held
-          jq -e '[.[] | select(.depName == "ms") | .updates[] | select((.pendingChecks // false) | not) | select(.newVersion != null)] | length == 0' deps.json
+          # minimist 1.2.5 has GHSA-xvch-5gv4-984h, fixed in 1.2.6: the update
+          # comes from the vulnerability rule (its branchTopic ends in
+          # -vulnerability, lib/config/options/index.ts) and is not pending.
+          jq -e '[.[] | select(.depName == "minimist") | .updates[] | select(.newVersion == "1.2.6" and (.branchName | endswith("-vulnerability")) and ((.pendingChecks // false) | not))] | length == 1' deps.json
+          # ms 2.1.2 -> 2.1.3 is an ordinary update, released in 2020, and is
+          # held by minimumReleaseAge.
+          jq -e '[.[] | select(.depName == "ms") | .updates[]] | length > 0 and all(.pendingChecks == true)' deps.json
 
   token:
     runs-on: ubuntu-latest
