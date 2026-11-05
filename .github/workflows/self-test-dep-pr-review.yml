@@ -32,6 +32,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # Decisions no real package reproduces on demand (a dirty workspace
+      # crate next to a tagged sibling, say), with the network stubbed.
+      - name: Collector unit tests
+        run: python3 -I test/dep-pr-review/test_collect.py
+
       - name: Collect the fixture updates
         run: |
           set -euo pipefail

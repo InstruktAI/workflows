@@ -638,8 +638,12 @@ def review_crate(change: Change, base: Path, head: Path):
     # Upstream identity is anchored on the PREVIOUS version's .crate.
     old_data, old = (crate_files(change.name, change.old) if change.old else (None, None))
     repo = github_repo(new["repository"])
+    # Every reason the result is not positive is recorded, so settlement can
+    # tell whether "no release tag of its own" is the only one left.
+    open_issues: list[str] = []
     if old is None:
         checks.append(NEW_DEPENDENCY)
+        open_issues.append("new-dependency")
         status = "unverifiable" if status == "pass" else status
     elif github_repo(old["repository"]) != repo:
         checks.append(f"repository changed: `{old['repository']}` -> `{new['repository']}`")
@@ -649,16 +653,20 @@ def review_crate(change: Change, base: Path, head: Path):
     vcs = new["vcs"]
     sha = (vcs or {}).get("git", {}).get("sha1")
     tag = None
-    companion = False
     if not sha:
         checks.append("the .crate has no .cargo_vcs_info.json commit; the source cannot be tied to a commit")
+        open_issues.append("no-vcs-info")
         status = "fail" if status == "fail" else "unverifiable"
     elif not repo:
         checks.append(f"repository `{new['repository']}` is not on GitHub; commit {sha} not checked")
+        open_issues.append("not-github")
         status = "fail" if status == "fail" else "unverifiable"
     else:
         if vcs.get("git", {}).get("dirty"):
+            # The worktree had changes the commit does not hold: no tag,
+            # own or a sibling's, can vouch for what was packaged.
             checks.append("packaged from a dirty worktree")
+            open_issues.append("dirty")
             status = "fail" if status == "fail" else "unverifiable"
         found = find_tag(repo, change.name, change.new)
         if found and found[1] == sha:
@@ -671,15 +679,17 @@ def review_crate(change: Change, base: Path, head: Path):
             # Settled in collect() when a sibling crate of the same
             # repository in this PR has a verified release tag containing it.
             checks.append(f"commit {sha} exists upstream but no release tag for {change.new} was found")
+            open_issues.append("no-release-tag")
             status = "fail" if status == "fail" else "unverifiable"
-            companion = True
         else:
             checks.append(f"commit {sha} does not exist in {repo}")
             status = "fail"
     artifacts = (old_data, new_data, "tar")
     tags = [t for t in (tag,) if t]
     facts = {"repository": new["repository"], "commit": sha, "tag": tag}
-    if companion and old is not None and len(checks) and status == "unverifiable":
+    # Settlement in collect() may resolve exactly one condition: "no release
+    # tag of its own", and only when it is the sole open issue.
+    if status == "unverifiable" and open_issues == ["no-release-tag"]:
         facts["companion_candidate"] = True
     return artifacts, result(status, checks, **facts), release_notes(repo, tags)
 
@@ -1103,7 +1113,7 @@ def settle_companions(entries: list[dict], out: Path):
                 and e["provenance"].get("tag")]
     for entry in entries:
         prov = entry["provenance"]
-        if not prov.pop("companion_candidate", False):
+        if not prov.pop("companion_candidate", False) or prov["status"] != "unverifiable":
             continue
         repo = github_repo(prov.get("repository"))
         for sibling in verified:
