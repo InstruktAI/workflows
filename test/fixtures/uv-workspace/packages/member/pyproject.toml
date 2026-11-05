@@ -1,0 +1,6 @@
+[project]
+name = "deps-audit-uv-member"
+version = "0.1.0"
+requires-python = ">=3.12"
+# Only the member depends on this; the export must still include it.
+dependencies = ["packaging"]

@@ -37,6 +37,12 @@ jobs:
       working-directory: test/fixtures/uv
       dependency-review: never
 
+  uv-workspace:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/uv-workspace
+      dependency-review: never
+
   npm:
     uses: ./.github/workflows/deps-audit.yml
     with:
@@ -50,7 +56,7 @@ jobs:
       dependency-review: never
 
   detection:
-    needs: [cargo, cargo-inherited, cargo-virtual, uv, npm, pnpm]
+    needs: [cargo, cargo-inherited, cargo-virtual, uv, uv-workspace, npm, pnpm]
     runs-on: ubuntu-latest
     steps:
       - name: Assert every fixture was detected
@@ -62,6 +68,8 @@ jobs:
           MSRV_VIRTUAL: ${{ needs.cargo-virtual.outputs.msrv }}
           MSRV_VIRTUAL_MATRIX: ${{ needs.cargo-virtual.outputs.msrv-matrix }}
           PYTHON: ${{ needs.uv.outputs.python }}
+          UV_AUDITED: ${{ needs.uv.outputs.python-audited }}
+          UV_WORKSPACE_AUDITED: ${{ needs.uv-workspace.outputs.python-audited }}
           NPM: ${{ needs.npm.outputs.node }}
           PNPM: ${{ needs.pnpm.outputs.node }}
         run: |
@@ -76,6 +84,10 @@ jobs:
           check msrv-virtual "$MSRV_VIRTUAL" '1.85 1.88'
           check msrv-virtual-matrix "$MSRV_VIRTUAL_MATRIX" '[{"rust-version":"1.85","args":"-p deps-audit-virtual-b"},{"rust-version":"1.88","args":"-p deps-audit-virtual-a"}]'
           check python "$PYTHON" uv
+          # dependency groups are exported (idna is dev-only)
+          check uv-audited "$UV_AUDITED" 'idna==3.20 six==1.17.0'
+          # a sibling member's dependency is exported (packaging is member-only)
+          check uv-workspace-audited "$UV_WORKSPACE_AUDITED" 'packaging==26.3 six==1.17.0'
           check npm "$NPM" npm
           check pnpm "$PNPM" pnpm
           exit "$status"

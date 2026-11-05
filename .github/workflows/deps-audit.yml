@@ -67,6 +67,9 @@ on:
       node:
         description: "'npm' or 'pnpm' when package.json and its lockfile were found"
         value: ${{ jobs.detect.outputs.node }}
+      python-audited:
+        description: The name==version pins pip-audit audited, space-separated and sorted
+        value: ${{ jobs.pip-audit.outputs.audited }}
 
 permissions:
   contents: read
@@ -303,6 +306,8 @@ jobs:
     needs: detect
     if: needs.detect.outputs.python != '' && inputs.pip-audit
     runs-on: ubuntu-latest
+    outputs:
+      audited: ${{ steps.export.outputs.audited }}
     steps:
       - name: Require a lockfile
         if: needs.detect.outputs.python == 'unlocked'
@@ -317,14 +322,19 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Export the locked dependency set
+        id: export
         working-directory: ${{ inputs.working-directory }}
-        # Every group and extra, without the project itself or local paths
+        # Every workspace member's dependencies (--all-packages), every group
+        # and extra, without the workspace members themselves or local paths
         # (they are not on PyPI). Exact pins, so pip-audit needs no resolver.
-        run: >-
-          uv export --frozen --format requirements.txt
-          --all-groups --all-extras
-          --no-emit-workspace --no-emit-local --no-hashes
-          --output-file "$RUNNER_TEMP/requirements.txt"
+        run: |
+          uv export --frozen --format requirements.txt \
+            --all-packages --all-groups --all-extras \
+            --no-emit-workspace --no-emit-local --no-hashes \
+            --output-file "$RUNNER_TEMP/requirements.txt"
+          audited=$(grep -E '^[A-Za-z0-9]' "$RUNNER_TEMP/requirements.txt" | cut -d ' ' -f 1 | sort | paste -sd ' ' -)
+          echo "audited=$audited" >> "$GITHUB_OUTPUT"
+          echo "Auditing: $audited"
 
       # --strict: a dependency PyPI no longer serves (404, typical for removed
       # malicious packages) fails the audit instead of being skipped.
