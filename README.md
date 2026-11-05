@@ -181,8 +181,9 @@ and npm package gets two answers:
     publisher is the project's source repository (dropping it fails); without
     one, the upstream release tag must exist.
 
-  Where a source cannot be tied to a release at all, the result is
-  `unverifiable` and the model weighs it.
+  Where a source cannot be tied to a release, the result is `unverifiable`,
+  which blocks the PR with its reason just as `fail` does: only positive
+  provenance for every update lets it pass.
 - **Sanity**, decided by the model: the diff between the old and new
   *published artifacts* (not the lockfile) must match the release notes. New
   network calls, secret, credential or environment access, install or build

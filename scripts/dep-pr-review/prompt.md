@@ -26,10 +26,9 @@ itself a finding (category `other`, severity `high`).
 
 ## What is already decided
 
-Scripts decided provenance before you ran. A `fail` there fails the pull
-request whatever you answer, so you do not re-check it. For a dependency whose
-provenance is `unverifiable`, say in a finding why the source could not be
-tied to a release, and weigh that in your verdict.
+Scripts decided provenance before you ran. Anything but `pass` there blocks
+the pull request whatever you answer, so you do not re-check it; judge the
+code change of every dependency regardless.
 
 The `flags` in the summary are pattern matches on added lines: hints of where
 to look, not findings. Many are harmless (an HTTP client library adding a

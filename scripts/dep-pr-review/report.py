@@ -82,8 +82,13 @@ def main() -> int:
                 to = f"{to} ({dep['to'][:12]})"
             lines.append(f"| {dep['ecosystem']} `{clean(dep['name'], 200)}` | {clean(frm, 120)} → {clean(to, 120)} "
                          f"| **{prov['status']}** | {'; '.join(clean(c, 400) for c in prov['checks'])} |")
+            # Only positive provenance lets the gate pass: `unverifiable` blocks
+            # with its reason just as `fail` does.
             if prov["status"] == "fail":
                 blockers.append(f"provenance check failed for `{clean(dep['name'], 200)}` {clean(to, 120)}")
+            elif prov["status"] != "pass":
+                blockers.append(f"provenance could not be verified for `{clean(dep['name'], 200)}` {clean(to, 120)}: "
+                                + "; ".join(clean(c, 400) for c in prov["checks"]))
         flagged = [(d, d["flags"]) for d in deps if d.get("flags")]
         if flagged:
             lines += ["", "<details><summary>Pattern flags handed to the reviewer (hints, not findings)</summary>", ""]

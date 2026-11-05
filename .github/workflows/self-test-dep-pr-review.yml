@@ -70,11 +70,19 @@ jobs:
           passed=$?
           python3 -I "$TOOL/report.py" --name t --collect failure --review skipped --out failed.md > /dev/null
           failed=$?
+          # A sane verdict does not rescue provenance that is only unverifiable.
+          jq '.dependencies[0].provenance.status = "unverifiable" | .dependencies[0].provenance.checks = ["no release tag found"]' \
+            "$RUNNER_TEMP/action-release/summary.json" > unverifiable.json
+          python3 -I "$TOOL/report.py" --name t --collect success --review success \
+            --summary unverifiable.json --verdict "$FIXTURES/verdict-sane.json" --out unverifiable.md > /dev/null
+          unverifiable=$?
           cat blocked.md
           # shellcheck disable=SC2016 # the backticks are literal text in the comment
           [ "$blocked" = 1 ] && grep -q 'provenance check failed for `actions/checkout`' blocked.md \
             && [ "$passed" = 0 ] && grep -q '\*\*Passed\.\*\*' passed.md \
-            && [ "$failed" = 1 ] && grep -q 'collector did not finish' failed.md
+            && [ "$failed" = 1 ] && grep -q 'collector did not finish' failed.md \
+            && [ "$unverifiable" = 1 ] && grep -q 'provenance could not be verified' unverifiable.md \
+            && ! grep -q 'Passed' unverifiable.md
 
   # Renovate's local platform runs a lookup over the working directory and
   # can write a report file (docs.renovatebot.com/modules/platform/local,
