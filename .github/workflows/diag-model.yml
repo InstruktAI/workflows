@@ -11,11 +11,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {case: bare, settings: '', args: ''}
-          - {case: schema, settings: '', args: "--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
-          - {case: tools, settings: '', args: "--tools \"Read,Glob,Grep\"\n--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
-          - {case: settings, settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Bash","Edit","Write","WebFetch","WebSearch","Read(./.git/**)","Read(./.git)"]}}', args: "--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
-          - {case: sources, settings: '', args: "--setting-sources user\n--disallowedTools \"mcp__*\"\n--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
+          - case: bare
+            settings: ''
+            args: ''
+          - case: schema
+            settings: ''
+            args: |
+              --json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'
+          - case: tools
+            settings: ''
+            args: |
+              --tools "Read,Glob,Grep"
+              --json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'
+          - case: settings
+            settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Bash","Edit","Write","WebFetch","WebSearch","Read(./.git/**)","Read(./.git)"]}}'
+            args: |
+              --json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'
+          - case: sources
+            settings: ''
+            args: |
+              --setting-sources user
+              --disallowedTools "mcp__*"
+              --json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
