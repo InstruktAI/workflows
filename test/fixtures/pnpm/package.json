@@ -1,0 +1,7 @@
+{
+  "name": "deps-audit-fixture-pnpm",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.10.0",
+  "dependencies": { "ms": "2.1.3" }
+}

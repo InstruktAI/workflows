@@ -1,0 +1,93 @@
+name: self-test
+
+# Runs deps-audit.yml from this commit against the clean fixtures under
+# test/fixtures/ and asserts each ecosystem was detected, so a detection
+# regression cannot pass as "every check skipped".
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/cargo
+
+  cargo-inherited:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/cargo-inherited
+      dependency-review: never
+
+  cargo-virtual:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/cargo-virtual
+      dependency-review: never
+
+  uv:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/uv
+      dependency-review: never
+
+  uv-workspace:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/uv-workspace
+      dependency-review: never
+
+  npm:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/npm
+      dependency-review: never
+
+  pnpm:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/pnpm
+      dependency-review: never
+
+  detection:
+    needs: [cargo, cargo-inherited, cargo-virtual, uv, uv-workspace, npm, pnpm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert every fixture was detected
+        env:
+          CARGO: ${{ needs.cargo.outputs.cargo }}
+          MSRV: ${{ needs.cargo.outputs.msrv }}
+          MSRV_INHERITED: ${{ needs.cargo-inherited.outputs.msrv }}
+          MSRV_INHERITED_MATRIX: ${{ needs.cargo-inherited.outputs.msrv-matrix }}
+          MSRV_VIRTUAL: ${{ needs.cargo-virtual.outputs.msrv }}
+          MSRV_VIRTUAL_MATRIX: ${{ needs.cargo-virtual.outputs.msrv-matrix }}
+          PYTHON: ${{ needs.uv.outputs.python }}
+          UV_AUDITED: ${{ needs.uv.outputs.python-audited }}
+          UV_WORKSPACE_AUDITED: ${{ needs.uv-workspace.outputs.python-audited }}
+          NPM: ${{ needs.npm.outputs.node }}
+          PNPM: ${{ needs.pnpm.outputs.node }}
+        run: |
+          status=0
+          check() { if [ "$2" != "$3" ]; then echo "::error::$1: expected '$3', got '$2'"; status=1; fi; }
+          check cargo "$CARGO" true
+          check msrv "$MSRV" 1.85
+          # rust-version.workspace = true on the root package and a member
+          check msrv-inherited "$MSRV_INHERITED" 1.85
+          check msrv-inherited-matrix "$MSRV_INHERITED_MATRIX" '[{"rust-version":"1.85","args":"--workspace"}]'
+          # virtual workspace, members on different MSRVs, one single-quoted
+          check msrv-virtual "$MSRV_VIRTUAL" '1.85 1.88'
+          check msrv-virtual-matrix "$MSRV_VIRTUAL_MATRIX" '[{"rust-version":"1.85","args":"-p deps-audit-virtual-b"},{"rust-version":"1.88","args":"-p deps-audit-virtual-a"}]'
+          check python "$PYTHON" uv
+          # dependency groups are exported (idna is dev-only)
+          check uv-audited "$UV_AUDITED" 'idna==3.20 six==1.17.0'
+          # a sibling member's dependency is exported (packaging is member-only)
+          check uv-workspace-audited "$UV_WORKSPACE_AUDITED" 'packaging==26.3 six==1.17.0'
+          check npm "$NPM" npm
+          check pnpm "$PNPM" pnpm
+          exit "$status"
