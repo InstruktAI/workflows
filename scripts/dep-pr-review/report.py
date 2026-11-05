@@ -48,6 +48,7 @@ def main() -> int:
     parser.add_argument("--name", required=True)
     parser.add_argument("--collect", required=True, help="result of the collect job")
     parser.add_argument("--review", required=True, help="result of the review job")
+    parser.add_argument("--bundle", default="success", help="outcome of the bundle completeness check")
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--verdict", type=Path)
     parser.add_argument("--out", type=Path, required=True)
@@ -61,6 +62,8 @@ def main() -> int:
     if args.collect != "success" or summary is None:
         blockers.append("the deterministic collector did not finish; see the `collect` job log")
         summary = {"dependencies": [], "unsupported_files": []}
+    elif args.bundle != "success":
+        blockers.append("the downloaded bundle does not match its manifest; see the `outcome` job log")
 
     deps = summary["dependencies"]
     unsupported = summary["unsupported_files"]

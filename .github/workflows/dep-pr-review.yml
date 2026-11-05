@@ -109,6 +109,9 @@ jobs:
         with:
           name: ${{ inputs.name }}-bundle
           path: ${{ runner.temp }}/bundle
+          # Extracted artifacts hold dotfiles (.cargo_vcs_info.json, .npmrc,
+          # .github/...); upload-artifact drops them by default.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
@@ -145,6 +148,9 @@ jobs:
         with:
           name: ${{ inputs.name }}-bundle
           path: bundle
+
+      - name: Check the bundle is complete
+        run: scripts/dep-pr-review/verify-bundle.sh bundle
 
       # Pinned the way InstruktAI/logging's release inspector pins it
       # (.github/workflows/auto-release.yml). In agent mode (a `prompt`
@@ -227,15 +233,22 @@ jobs:
           name: ${{ inputs.name }}-verdict
           path: verdict
 
+      - id: bundle
+        name: Check the bundle is complete
+        if: needs.collect.result == 'success'
+        continue-on-error: true
+        run: scripts/dep-pr-review/verify-bundle.sh bundle
+
       - id: report
         name: Decide and render the outcome
         env:
           NAME: ${{ inputs.name }}
           COLLECT: ${{ needs.collect.result }}
           REVIEW: ${{ needs.review.result }}
+          BUNDLE: ${{ steps.bundle.outcome }}
         run: |
           set +e
-          python3 -I scripts/dep-pr-review/report.py --name "$NAME" --collect "$COLLECT" --review "$REVIEW" \
+          python3 -I scripts/dep-pr-review/report.py --name "$NAME" --collect "$COLLECT" --review "$REVIEW" --bundle "$BUNDLE" \
             --summary bundle/summary.json --verdict verdict/verdict.json --out comment.md
           echo "status=$?" >> "$GITHUB_OUTPUT"
           cat comment.md >> "$GITHUB_STEP_SUMMARY"

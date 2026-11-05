@@ -325,6 +325,15 @@ def unpack(data: bytes, kind: str, dest: Path):
         safe_extract_zip(data, dest)
     else:
         safe_extract_tar(data, dest)
+    # Symlinks become plain files naming their target: the bundle is checked
+    # file by file after upload, and a link must not point outside it.
+    for dirpath, dirnames, filenames in os.walk(dest):
+        for name in dirnames + filenames:
+            link = Path(dirpath) / name
+            if link.is_symlink():
+                target = os.readlink(link)
+                link.unlink()
+                link.write_text(f"symlink -> {target}\n")
     # Collapse a single top-level directory so old and new line up.
     entries = list(dest.iterdir())
     if len(entries) == 1 and entries[0].is_dir():
@@ -714,7 +723,26 @@ def collect(base: Path, head: Path, out: Path) -> dict:
         entries.append(entry)
     summary = {"dependencies": entries, "unsupported_files": unsupported}
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    write_manifest(out)
     return summary
+
+
+def write_manifest(out: Path):
+    """sha256 of every file in the bundle, hidden ones included, in
+    `sha256sum` format, so a download can be checked for completeness."""
+    lines = []
+    for rel, path in sorted(walk_all(out)):
+        if rel != "MANIFEST.sha256":
+            lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  ./{rel}\n")
+    (out / "MANIFEST.sha256").write_text("".join(lines))
+
+
+def walk_all(root: Path):
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if path.is_file() and not path.is_symlink():
+                yield path.relative_to(root).as_posix(), path
 
 
 def main() -> int:
