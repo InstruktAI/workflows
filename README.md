@@ -49,6 +49,14 @@ wires the tools up. It needs `contents: read` and no secrets.
 Each gate has a boolean input to switch it off: `osv-scanner`, `cargo-deny`,
 `msrv`, `pip-audit`, `node-audit`.
 
+`pip-audit` only knows PyPI. Workspace members and local path dependencies are
+not exported, so they are never looked up; but a locked package that comes
+from a private index, and so is unknown to PyPI, fails under `--strict` the
+same way a removed malicious package does. That is intentional: a package the
+gate cannot audit is never passed as clean. A repo that depends on a private
+index sets `pip-audit: false` and keeps the `osv-scanner` gate, which audits the
+same lockfile against osv.dev.
+
 ```yaml
 on:
   pull_request:
