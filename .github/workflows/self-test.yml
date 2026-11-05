@@ -1,0 +1,59 @@
+name: self-test
+
+# Runs deps-audit.yml from this commit against the clean fixtures under
+# test/fixtures/ and asserts each ecosystem was detected, so a detection
+# regression cannot pass as "every check skipped".
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/cargo
+
+  uv:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/uv
+      dependency-review: never
+
+  npm:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/npm
+      dependency-review: never
+
+  pnpm:
+    uses: ./.github/workflows/deps-audit.yml
+    with:
+      working-directory: test/fixtures/pnpm
+      dependency-review: never
+
+  detection:
+    needs: [cargo, uv, npm, pnpm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert every fixture was detected
+        env:
+          CARGO: ${{ needs.cargo.outputs.cargo }}
+          MSRV: ${{ needs.cargo.outputs.msrv }}
+          PYTHON: ${{ needs.uv.outputs.python }}
+          NPM: ${{ needs.npm.outputs.node }}
+          PNPM: ${{ needs.pnpm.outputs.node }}
+        run: |
+          status=0
+          check() { if [ "$2" != "$3" ]; then echo "::error::$1: expected '$3', got '$2'"; status=1; fi; }
+          check cargo "$CARGO" true
+          check msrv "$MSRV" 1.85
+          check python "$PYTHON" uv
+          check npm "$NPM" npm
+          check pnpm "$PNPM" pnpm
+          exit "$status"
