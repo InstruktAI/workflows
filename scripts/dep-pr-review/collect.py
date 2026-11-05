@@ -165,6 +165,38 @@ def find_tag(repo: str, name: str, version: str) -> tuple[str, str] | None:
     return None
 
 
+NEW_DEPENDENCY = ("new dependency: there is no previous publication to anchor its upstream identity on, "
+                  "so a human must review it")
+
+
+def tag_spellings(name: str, version: str) -> list[str]:
+    bare = name.rsplit("/", 1)[-1]
+    out = [f"v{version}", version]
+    for n in dict.fromkeys([name, bare]):
+        out += [f"{n}-v{version}", f"{n}-{version}", f"{n}@{version}", f"{n}/v{version}"]
+    return out
+
+
+def bind_release_tag(repo: str | None, ref: str | None, commit: str | None,
+                     name: str, version: str) -> tuple[bool, str]:
+    """A build is positive provenance only when it ran on the upstream
+    release tag of exactly this version, and that tag still points to the
+    commit it was built from. A branch build, or another tag, is not."""
+    if not repo:
+        return False, "the build names no GitHub source repository"
+    if not ref or not ref.startswith("refs/tags/"):
+        return False, f"built from `{ref}`, not from a release tag"
+    tag = ref[len("refs/tags/"):]
+    if tag.lower() not in {t.lower() for t in tag_spellings(name, version)}:
+        return False, f"built from tag `{tag}`, which is not the release tag of {version}"
+    upstream = tag_commit(repo, tag)
+    if upstream is None:
+        return False, f"build tag `{tag}` does not exist in {repo}"
+    if commit and upstream != commit:
+        return False, f"build commit {commit} is not upstream tag `{tag}` ({upstream})"
+    return True, f"built from upstream release tag `{tag}` of {repo} at {upstream}"
+
+
 def release_notes(repo: str | None, tags: list[str]) -> str:
     """Release bodies for the given tags, plus the upstream CHANGELOG at the
     newest one when the bodies are short."""
@@ -544,6 +576,9 @@ def review_action(change: Change):
             status = "fail"
         else:
             checks.append(f"GitHub release `{version}` exists")
+    if change.old is None:
+        checks.append(NEW_DEPENDENCY)
+        status = "unverifiable" if status == "pass" else status
     tags = [t for t in (change.old_comment, version) if t]
     return fetch_action(repo, change), result(status, checks, repository=repo, tag=version), release_notes(repo, tags)
 
@@ -598,17 +633,21 @@ def review_crate(change: Change, base: Path, head: Path):
         status = "fail"
     else:
         checks.append("Cargo.lock checksum is the reviewed crates.io artifact")
+    # Upstream identity is anchored on the PREVIOUS version's .crate.
     old_data, old = (crate_files(change.name, change.old) if change.old else (None, None))
-    expected = old["repository"] if old else http_json(f"https://crates.io/api/v1/crates/{change.name}")["crate"].get("repository")
     repo = github_repo(new["repository"])
-    if github_repo(expected) != repo:
-        checks.append(f"repository changed: `{expected}` -> `{new['repository']}`")
+    if old is None:
+        checks.append(NEW_DEPENDENCY)
+        status = "unverifiable" if status == "pass" else status
+    elif github_repo(old["repository"]) != repo:
+        checks.append(f"repository changed: `{old['repository']}` -> `{new['repository']}`")
         status = "fail"
     else:
         checks.append(f"repository `{new['repository']}` matches the previous version")
     vcs = new["vcs"]
     sha = (vcs or {}).get("git", {}).get("sha1")
     tag = None
+    companion = False
     if not sha:
         checks.append("the .crate has no .cargo_vcs_info.json commit; the source cannot be tied to a commit")
         status = "fail" if status == "fail" else "unverifiable"
@@ -627,14 +666,20 @@ def review_crate(change: Change, base: Path, head: Path):
             checks.append(f".cargo_vcs_info.json commit {sha} is not upstream tag `{found[0]}` ({found[1]})")
             status = "fail"
         elif commit_exists(repo, sha):
+            # Settled in collect() when a sibling crate of the same
+            # repository in this PR has a verified release tag containing it.
             checks.append(f"commit {sha} exists upstream but no release tag for {change.new} was found")
             status = "fail" if status == "fail" else "unverifiable"
+            companion = True
         else:
             checks.append(f"commit {sha} does not exist in {repo}")
             status = "fail"
     artifacts = (old_data, new_data, "tar")
     tags = [t for t in (tag,) if t]
-    return artifacts, result(status, checks, repository=new["repository"], commit=sha, tag=tag), release_notes(repo, tags)
+    facts = {"repository": new["repository"], "commit": sha, "tag": tag}
+    if companion and old is not None and len(checks) and status == "unverifiable":
+        facts["companion_candidate"] = True
+    return artifacts, result(status, checks, **facts), release_notes(repo, tags)
 
 
 def npm_packument(name: str, version: str):
@@ -670,8 +715,10 @@ def verify_npm_signature(name: str, version: str, dist: dict, keys: dict) -> str
     return "no registry signature with a known npm signing key"
 
 
-def npm_provenance(meta: dict, integrity_hex: str) -> tuple[str | None, str | None]:
-    """(source repository, problem) from the SLSA provenance attestation."""
+def npm_provenance(meta: dict) -> tuple[dict | None, str | None]:
+    """({repo, ref, commit, digest}, problem) from the SLSA provenance
+    attestation npm serves at dist.attestations.url (statement shape as
+    served by registry.npmjs.org)."""
     attestations = (meta.get("dist") or {}).get("attestations")
     if not attestations:
         return None, None
@@ -680,12 +727,18 @@ def npm_provenance(meta: dict, integrity_hex: str) -> tuple[str | None, str | No
         if "slsa.dev/provenance" not in attestation.get("predicateType", ""):
             continue
         statement = json.loads(base64.b64decode(attestation["bundle"]["dsseEnvelope"]["payload"]))
-        digests = [s.get("digest", {}).get("sha512") for s in statement.get("subject", [])]
-        if integrity_hex not in digests:
-            return None, "provenance subject digest does not match the published tarball"
-        workflow = statement["predicate"]["buildDefinition"]["externalParameters"]["workflow"]
-        return github_repo(workflow.get("repository")), None
+        build = statement["predicate"]["buildDefinition"]
+        workflow = build["externalParameters"]["workflow"]
+        commits = [d.get("digest", {}).get("gitCommit") for d in build.get("resolvedDependencies") or []]
+        return {"repo": github_repo(workflow.get("repository")), "ref": workflow.get("ref"),
+                "commit": next((c for c in commits if c), None),
+                "digests": [s.get("digest", {}).get("sha512") for s in statement.get("subject", [])]}, None
     return None, "attestations listed but no SLSA provenance among them"
+
+
+def npm_repository(meta: dict) -> str | None:
+    repository = meta.get("repository")
+    return github_repo(repository.get("url") if isinstance(repository, dict) else repository)
 
 
 def review_npm(change: Change, base: Path, head: Path):
@@ -722,26 +775,51 @@ def review_npm(change: Change, base: Path, head: Path):
         status = "fail"
     else:
         checks.append("npm registry signature verifies (ECDSA P-256 over name@version:integrity)")
-    declared = github_repo((meta.get("repository") or {}).get("url") if isinstance(meta.get("repository"), dict) else meta.get("repository"))
-    source, problem = npm_provenance(meta, integrity_hex)
+    # Upstream identity is anchored on the PREVIOUS version's publication:
+    # its declared repository and, where it had one, its provenance source.
     old_meta = npm_packument(change.name, change.old) if change.old else None
+    declared = npm_repository(meta)
+    provenance, problem = npm_provenance(meta)
+    old_provenance = npm_provenance(old_meta)[0] if old_meta else None
+    anchor = (old_provenance or {}).get("repo") or (npm_repository(old_meta) if old_meta else None)
+    repo = anchor
+    status_before = status
+    if old_meta is None:
+        checks.append(NEW_DEPENDENCY)
+        status = "unverifiable" if status == "pass" else status
+    elif anchor is None:
+        checks.append(f"{change.old} names no GitHub source repository to anchor {change.new} on")
+        status = "unverifiable" if status == "pass" else status
+    elif declared != anchor:
+        checks.append(f"upstream identity changed: {change.old} came from {anchor}, {change.new} declares {declared}")
+        status = "fail"
     if problem:
         checks.append(problem)
         status = "fail"
-    elif source:
-        if declared and source != declared:
-            checks.append(f"provenance was built from {source}, but package.json declares {declared}")
+    elif provenance:
+        if integrity_hex not in provenance["digests"]:
+            checks.append("provenance subject digest does not match the published tarball")
             status = "fail"
-        else:
-            checks.append(f"SLSA provenance: built from {source} (sigstore bundle not verified here)")
-    elif old_meta and (old_meta.get("dist") or {}).get("attestations"):
+        if anchor and provenance["repo"] != anchor:
+            checks.append(f"provenance was built from {provenance['repo']}, not from {anchor}")
+            status = "fail"
+        ok, message = bind_release_tag(provenance["repo"], provenance["ref"], provenance["commit"],
+                                       change.name, change.new)
+        checks.append(f"SLSA provenance: {message} (sigstore bundle not verified here)")
+        if not ok:
+            status = "fail"
+    elif old_provenance:
         checks.append(f"{change.old} had a provenance attestation, {change.new} has none")
         status = "fail"
-    else:
-        checks.append("no provenance attestation; registry signature only")
+    elif status == status_before and anchor:
+        found = find_tag(anchor, change.name, change.new)
+        if found:
+            checks.append(f"no provenance attestation; upstream release tag `{found[0]}` exists in {anchor}")
+        else:
+            checks.append(f"no provenance attestation and no release tag for {change.new} in {anchor}")
+            status = "unverifiable" if status == "pass" else status
     old_data = http_get(old_meta["dist"]["tarball"]) if old_meta else None
     artifacts = (old_data, new_data, "tar")
-    repo = source or declared
     found = find_tag(repo, change.name.rsplit("/", 1)[-1], change.new) if repo else None
     return artifacts, result(status, checks, repository=repo), release_notes(repo, [found[0]] if found else [])
 
@@ -764,13 +842,50 @@ def pypi_source(meta: dict) -> str | None:
     return github_repo((meta.get("info") or {}).get("home_page"))
 
 
-def pypi_provenance(name: str, version: str, filename: str):
+# Fulcio certificate extensions (sigstore fulcio docs/oid-info.md):
+# 1.3.6.1.4.1.57264.1.12 source repository URI, .13 source repository
+# digest (the commit), .14 source repository ref.
+FULCIO = {"12": "repo", "13": "commit", "14": "ref"}
+
+
+def fulcio_claims(certificate_b64: str) -> dict:
+    """Source repository, commit and ref from a sigstore signing
+    certificate, read with openssl. The certificate chain is not verified
+    here; PyPI verifies attestations when they are uploaded."""
+    with tempfile.TemporaryDirectory() as tmp:
+        der = Path(tmp, "cert.der")
+        der.write_bytes(base64.b64decode(certificate_b64))
+        text = subprocess.run(["openssl", "x509", "-inform", "DER", "-noout", "-text", "-in", str(der)],
+                              capture_output=True, text=True, check=True).stdout
+    claims = {}
+    for oid, key in FULCIO.items():
+        match = re.search(rf"1\.3\.6\.1\.4\.1\.57264\.1\.{oid}:\s*\n\s*(.*)", text)
+        if match:
+            value = match[1]
+            pattern = {"repo": r"https://\S+", "commit": r"[0-9a-f]{40}", "ref": r"refs/\S+"}[key]
+            found = re.search(pattern, value)
+            claims[key] = found[0] if found else None
+    claims["repo"] = github_repo(claims.get("repo"))
+    return claims
+
+
+def pypi_provenance(name: str, version: str, filename: str) -> dict | None:
+    """{publishers: [owner/repo], claims: [{repo, commit, ref}]} from PyPI's
+    integrity API (docs.pypi.org/api/integrity), or None without any."""
     data = try_json(f"https://pypi.org/integrity/{name}/{version}/{filename}/provenance",
                     "application/vnd.pypi.integrity.v1+json")
     if not data:
         return None
-    publishers = [b.get("publisher") or {} for b in data.get("attestation_bundles", [])]
-    return [github_repo("github.com/" + p["repository"]) for p in publishers if p.get("kind") == "GitHub" and p.get("repository")]
+    publishers, claims = [], []
+    for bundle in data.get("attestation_bundles", []):
+        publisher = bundle.get("publisher") or {}
+        if publisher.get("kind") == "GitHub" and publisher.get("repository"):
+            publishers.append(github_repo("github.com/" + publisher["repository"]))
+        for attestation in bundle.get("attestations", []):
+            certificate = (attestation.get("verification_material") or {}).get("certificate")
+            if certificate:
+                claims.append(fulcio_claims(certificate))
+    return {"publishers": sorted(set(publishers)), "claims": claims} if publishers or claims else None
 
 
 def dist_key(filename: str, version: str) -> str:
@@ -833,35 +948,57 @@ def review_pypi(change: Change, base: Path, head: Path):
     # Attestation per file: a release built by trusted publishing attests
     # every file it uploads, so a file without one next to files with one
     # was uploaded some other way.
-    with_attestation = sorted(f for f, publishers in attested.items() if publishers)
-    without = sorted(f for f, publishers in attested.items() if not publishers)
+    with_attestation = sorted(f for f, info in attested.items() if info)
+    without = sorted(f for f, info in attested.items() if not info)
     if with_attestation and without:
         checks.append(f"{len(without)} of {len(attested)} files have no PEP 740 attestation: {', '.join(without)}")
         status = "fail"
-    publishers = sorted({p for f in with_attestation for p in attested[f]})
-    repo = pypi_source(meta)
+    publishers = sorted({p for f in with_attestation for p in attested[f]["publishers"]})
+    # Upstream identity is anchored on the PREVIOUS version's publication:
+    # its source repository and, where it had them, its trusted publishers.
     old_file = old_served.get("sdist") or next(iter(old_served.values()), None)
-    if publishers:
-        if repo and repo not in publishers:
-            checks.append(f"PEP 740 attestation publisher {publishers} is not the project's source {repo}")
+    old_attested = pypi_provenance(change.name, change.old, old_file["filename"]) if old_file else None
+    anchor_publishers = (old_attested or {}).get("publishers") or []
+    anchor = (anchor_publishers[0] if anchor_publishers else None) or (pypi_source(old_meta) if old_meta else None)
+    repo = anchor
+    declared = pypi_source(meta)
+    if old_meta is None:
+        checks.append(NEW_DEPENDENCY)
+        status = "unverifiable" if status == "pass" else status
+    elif anchor is None:
+        checks.append(f"{change.old} names no GitHub source repository to anchor {change.new} on")
+        status = "unverifiable" if status == "pass" else status
+    else:
+        if declared and declared != anchor and declared not in anchor_publishers:
+            checks.append(f"upstream identity changed: {change.old} came from {anchor}, {change.new} declares {declared}")
             status = "fail"
-        else:
-            checks.append(f"every file has a PEP 740 attestation by trusted publisher {publishers[0]} "
+        if anchor_publishers and publishers != anchor_publishers:
+            checks.append(f"trusted publisher changed: {change.old} by {anchor_publishers}, {change.new} by {publishers or 'none'}")
+            status = "fail"
+    if publishers:
+        bound = True
+        for f in with_attestation:
+            for claim in attested[f]["claims"] or [{}]:
+                ok, message = bind_release_tag(claim.get("repo"), claim.get("ref"), claim.get("commit"),
+                                               change.name, change.new)
+                if not ok:
+                    checks.append(f"`{f}`: {message}")
+                    status, bound = "fail", False
+        if bound:
+            claim = attested[with_attestation[0]]["claims"][0]
+            checks.append(f"every file has a PEP 740 attestation by {publishers[0]}, "
+                          f"built from release tag `{claim['ref'][len('refs/tags/'):]}` at {claim['commit']} "
                           "(sigstore bundle not verified here)")
-            repo = repo or publishers[0]
-    elif old_file and pypi_provenance(change.name, change.old, old_file["filename"]):
+    elif old_attested:
         checks.append(f"{change.old} had a PEP 740 attestation, {change.new} has none")
         status = "fail"
-    elif repo:
-        found = find_tag(repo, change.name, change.new)
+    elif anchor and status == "pass":
+        found = find_tag(anchor, change.name, change.new)
         if found:
-            checks.append(f"no PEP 740 attestation; upstream tag `{found[0]}` exists in {repo}")
+            checks.append(f"no PEP 740 attestation; upstream release tag `{found[0]}` exists in {anchor}")
         else:
-            checks.append(f"no PEP 740 attestation and no release tag for {change.new} in {repo}")
-            status = "unverifiable" if status == "pass" else status
-    else:
-        checks.append("no PEP 740 attestation and no GitHub source URL")
-        status = "unverifiable" if status == "pass" else status
+            checks.append(f"no PEP 740 attestation and no release tag for {change.new} in {anchor}")
+            status = "unverifiable"
     found = find_tag(repo, change.name, change.new) if repo else None
     return (artifacts or None), result(status, checks, repository=repo, files=sorted(attested)), \
         release_notes(repo, [found[0]] if found else [])
@@ -946,10 +1083,37 @@ def collect(base: Path, head: Path, out: Path) -> dict:
         entry["review_blockers"] = blockers
         (folder / "provenance.json").write_text(json.dumps(provenance, indent=2))
         entries.append(entry)
+    settle_companions(entries, out)
     summary = {"dependencies": entries, "unsupported_files": unsupported}
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     write_manifest(out)
     return summary
+
+
+def settle_companions(entries: list[dict], out: Path):
+    """A workspace crate published without a tag of its own (time-core next
+    to time, say) is positive only when its .cargo_vcs_info.json commit is
+    contained in a release tag already verified, in this same PR, for a
+    sibling crate of the same anchored repository. Nothing else qualifies."""
+    verified = [e for e in entries if e["ecosystem"] == "crate" and e["provenance"]["status"] == "pass"
+                and e["provenance"].get("tag")]
+    for entry in entries:
+        prov = entry["provenance"]
+        if not prov.pop("companion_candidate", False):
+            continue
+        repo = github_repo(prov.get("repository"))
+        for sibling in verified:
+            if github_repo(sibling["provenance"].get("repository")) != repo:
+                continue
+            tag = sibling["provenance"]["tag"]
+            compare = try_json(f"{GITHUB_API}/repos/{repo}/compare/{prov['commit']}...{urllib.parse.quote(tag, safe='')}")
+            if compare and compare.get("status") in ("ahead", "identical"):
+                prov["checks"].append(f"commit {prov['commit']} is contained in release tag `{tag}`, verified in "
+                                      f"this PR for sibling crate {sibling['name']} {sibling['to']} of the same repository")
+                prov["status"] = "pass"
+                prov["companion_of"] = f"{sibling['name']} {sibling['to']}"
+                break
+        (out / entry["id"] / "provenance.json").write_text(json.dumps(prov, indent=2))
 
 
 def write_manifest(out: Path):

@@ -35,7 +35,7 @@ jobs:
       - name: Collect the fixture updates
         run: |
           set -euo pipefail
-          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna; do
+          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna npm-branch-build; do
             python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
               --out "$RUNNER_TEMP/$fixture"
           done
@@ -80,6 +80,17 @@ jobs:
             and any(.provenance.checks[]; startswith("every file has a PEP 740 attestation"))'
           grep -q '^### distribution sdist' "$RUNNER_TEMP"/pypi-idna/*/diff.patch
           grep -q '^### distribution wheel-py3-none-any' "$RUNNER_TEMP"/pypi-idna/*/diff.patch
+          # Provenance is anchored on the previous version and bound to the
+          # release tag: time-core (no tag of its own) passes only through
+          # v0.3.47, verified in the same PR for time; idna's attestation is
+          # bound to tag v3.20; semver 7.7.3, built from refs/heads/main,
+          # fails; a new dependency has no anchor and blocks.
+          check crate-time '.dependencies[] | select(.name == "time-core") | .provenance.status == "pass" and .provenance.companion_of == "time 0.3.47"'
+          # shellcheck disable=SC2016
+          check pypi-idna 'any(.dependencies[0].provenance.checks[]; contains("built from release tag `v3.20` at d55e65e1a3b1ede7f556bc202738066f5597e249"))'
+          # shellcheck disable=SC2016
+          check npm-branch-build '.dependencies[0].provenance.status == "fail" and any(.dependencies[0].provenance.checks[]; contains("built from `refs/heads/main`, not from a release tag"))'
+          check action-new '.dependencies[0].provenance.status == "unverifiable" and any(.dependencies[0].provenance.checks[]; startswith("new dependency"))'
           for fixture in crate-time action-release action-bad-sha action-reused-sha; do check "$fixture" '.unsupported_files == []'; done
 
       - name: The bundle manifest covers hidden files and catches a missing one

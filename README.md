@@ -173,13 +173,26 @@ and npm package gets two answers:
     version comment, and a GitHub release exists for that tag;
   - crate: the `.crate` matches its crates.io checksum, declares the same
     `repository` as the previous version, and its `.cargo_vcs_info.json`
-    commit is the upstream release tag;
-  - npm: the npm registry signature verifies, and a SLSA provenance
-    attestation, when present, names the declared repository and the
-    tarball's digest (dropping provenance between versions fails);
-  - PyPI: the file matches its PyPI digest; a PEP 740 attestation's trusted
-    publisher is the project's source repository (dropping it fails); without
-    one, the upstream release tag must exist.
+    commit is the upstream release tag. A workspace crate without a tag of
+    its own passes only when that commit is contained in a release tag
+    verified in the same PR for a sibling crate of the same repository;
+  - npm: the npm registry signature verifies; the declared repository is the
+    one the previous version came from; a SLSA provenance attestation, when
+    present, names that repository and the tarball's digest and was built
+    from the upstream release tag of exactly this version at the tagged
+    commit (a branch build fails, and so does dropping provenance); without
+    one, the upstream release tag must exist;
+  - PyPI: every distribution matches its PyPI digest; the source repository
+    and trusted publisher are the previous version's; a PEP 740 attestation's
+    signing certificate names the release tag of exactly this version at the
+    tagged commit (a branch build fails, and so does dropping attestations or
+    attesting only some files); without one, the upstream release tag must
+    exist.
+
+  Identity is anchored on the previous version's publication, never on the
+  new one's own metadata. A new dependency has nothing to anchor on and
+  blocks for a human. Sigstore bundles are not verified cryptographically
+  here; the registries verify them on upload.
 
   Where a source cannot be tied to a release, the result is `unverifiable`,
   which blocks the PR with its reason just as `fail` does: only positive
