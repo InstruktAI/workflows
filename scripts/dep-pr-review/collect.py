@@ -434,7 +434,13 @@ def detect(base: Path, head: Path) -> tuple[list[Change], list[str]]:
                 merged[ident] = Change(ecosystem, name, old["version"] if old else None, pin["version"],
                                        old_pin=old, new_pin=pin)
             merged[ident].files.append(rel)
-    unsupported = [rel for rel in changed_files(base, head) if UNSUPPORTED.search(rel)]
+    changed = changed_files(base, head)
+    unsupported = [rel for rel in changed if UNSUPPORTED.search(rel)]
+    # export-tree.py writes a submodule pointer as `gitlink <commit>`: a
+    # changed pointer is a dependency update this review cannot check.
+    for rel in changed:
+        if any((root / rel).is_file() and (root / rel).read_bytes().startswith(b"gitlink ") for root in (base, head)):
+            unsupported.append(f"submodule {rel}")
     return list(merged.values()), unsupported
 
 

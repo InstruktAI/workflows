@@ -289,6 +289,58 @@ jobs:
             exit 1
           fi
 
+  # PR trees are exported from git objects, not with git archive: a tracked
+  # Cargo.lock marked export-ignore, and a submodule pointer bump, must both
+  # reach the collector.
+  tree-export:
+    runs-on: ubuntu-latest
+    env:
+      TOOL: ${{ github.workspace }}/scripts/dep-pr-review
+      X: ${{ github.workspace }}/test/fixtures/dep-pr-review
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build a repository that hides its lockfile from git archive
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/repo"
+          git init -q "$repo"
+          cd "$repo"
+          git config user.name t
+          git config user.email t@invalid
+          cp "$X/export-ignore/gitattributes.txt" .gitattributes
+          cp "$X/crate-time/base/Cargo.lock" Cargo.lock
+          # shellcheck disable=SC2016 # an export-subst placeholder, literal
+          echo '$Format:%H$' > version.txt
+          git add -A
+          git update-index --add --cacheinfo "160000,9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0,vendor/sub"
+          git commit -qm base
+          cp "$X/crate-time/head/Cargo.lock" Cargo.lock
+          git add Cargo.lock
+          git update-index --cacheinfo "160000,3d3c42e5aac5ba805825da76410c181273ba90b1,vendor/sub"
+          git commit -qm head
+      - name: git archive loses the lockfile, the export keeps every tracked path
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/repo"
+          mkdir "$RUNNER_TEMP/archived"
+          git -C "$repo" archive HEAD | tar -x -C "$RUNNER_TEMP/archived"
+          test ! -e "$RUNNER_TEMP/archived/Cargo.lock"
+          python3 -I "$TOOL/export-tree.py" "$repo" HEAD~1 "$RUNNER_TEMP/base"
+          python3 -I "$TOOL/export-tree.py" "$repo" HEAD "$RUNNER_TEMP/head"
+          cmp "$RUNNER_TEMP/head/Cargo.lock" "$X/crate-time/head/Cargo.lock"
+          # shellcheck disable=SC2016 # the placeholder is literal text
+          grep -qxF '$Format:%H$' "$RUNNER_TEMP/head/version.txt"
+          grep -qx 'gitlink 3d3c42e5aac5ba805825da76410c181273ba90b1' "$RUNNER_TEMP/head/vendor/sub"
+      - name: The collector sees the hidden update and blocks the submodule
+        run: |
+          set -euo pipefail
+          python3 -I "$TOOL/collect.py" --base "$RUNNER_TEMP/base" --head "$RUNNER_TEMP/head" --out "$RUNNER_TEMP/bundle"
+          jq -e '[.dependencies[] | select(.name == "time") | .to] == ["0.3.47"]' "$RUNNER_TEMP/bundle/summary.json"
+          jq -e '.unsupported_files == ["submodule vendor/sub"]' "$RUNNER_TEMP/bundle/summary.json"
+
   # The same upload settings dep-pr-review uses, round-tripped through the
   # artifact service: every file, hidden ones included, arrives intact.
   bundle-roundtrip:

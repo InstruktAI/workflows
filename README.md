@@ -197,6 +197,10 @@ and npm package gets two answers:
   Where a source cannot be tied to a release, the result is `unverifiable`,
   which blocks the PR with its reason just as `fail` does: only positive
   provenance for every update lets it pass.
+  The PR's base and head trees are written from git objects (`git ls-tree`
+  and `git cat-file`), never with `git archive`, whose `export-ignore` and
+  `export-subst` attributes a PR could use to hide a lockfile; the written
+  paths must equal `git ls-tree`. A changed submodule pointer blocks.
 - **Sanity**, decided by the model: the diff between the old and new
   *published artifacts* (not the lockfile) must match the release notes. New
   network calls, secret, credential or environment access, install or build

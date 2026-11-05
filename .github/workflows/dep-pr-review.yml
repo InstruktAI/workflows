@@ -78,7 +78,8 @@ jobs:
           fetch-depth: ${{ inputs.base-dir == '' && '0' || '1' }}
           persist-credentials: false
 
-      # Both trees are exported as plain files; nothing in them is executed.
+      # Both trees are exported as plain files, every tracked path, checked
+      # against git ls-tree; nothing in them is executed.
       - name: Export the base and head trees
         env:
           BASE_DIR: ${{ inputs.base-dir }}
@@ -91,8 +92,10 @@ jobs:
             cp -R "src/$BASE_DIR/." "$RUNNER_TEMP/trees/base/"
             cp -R "src/$HEAD_DIR/." "$RUNNER_TEMP/trees/head/"
           else
-            git -C src archive "$BASE_SHA" | tar -x -C "$RUNNER_TEMP/trees/base"
-            git -C src archive HEAD | tar -x -C "$RUNNER_TEMP/trees/head"
+            # Every tracked path as stored: git archive would apply the
+            # trees' export-ignore and export-subst attributes.
+            python3 -I .dep-pr-review/scripts/dep-pr-review/export-tree.py src "$BASE_SHA" "$RUNNER_TEMP/trees/base"
+            python3 -I .dep-pr-review/scripts/dep-pr-review/export-tree.py src HEAD "$RUNNER_TEMP/trees/head"
           fi
 
       - id: collect
