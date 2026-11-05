@@ -35,7 +35,7 @@ jobs:
       - name: Collect the fixture updates
         run: |
           set -euo pipefail
-          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna npm-branch-build; do
+          for fixture in crate-time action-release action-bad-sha action-reused-sha npm-url-swap crate-checksum-swap pypi-hash-swap unhandled action-new action-tag-to-sha pypi-idna npm-branch-build action-many-to-one; do
             python3 -I "$TOOL/collect.py" --base "$FIXTURES/$fixture/base" --head "$FIXTURES/$fixture/head" \
               --out "$RUNNER_TEMP/$fixture"
           done
@@ -91,6 +91,13 @@ jobs:
           # shellcheck disable=SC2016
           check npm-branch-build '.dependencies[0].provenance.status == "fail" and any(.dependencies[0].provenance.checks[]; contains("built from `refs/heads/main`, not from a release tag"))'
           check action-new '.dependencies[0].provenance.status == "unverifiable" and any(.dependencies[0].provenance.checks[]; startswith("new dependency"))'
+          # Three old SHAs moving to one new SHA are three comparisons, each
+          # in its own bundle directory holding its own old side.
+          check action-many-to-one '[.dependencies[] | .id] | length == 3 and (unique | length) == 3'
+          check action-many-to-one '[.dependencies[] | .from_comment] | sort == ["v5.0.0", "v6.0.0", "v7.0.0"]'
+          for id in $(jq -r '.dependencies[].id' "$RUNNER_TEMP/action-many-to-one/summary.json"); do
+            test -d "$RUNNER_TEMP/action-many-to-one/$id/old"
+          done
           for fixture in crate-time action-release action-bad-sha action-reused-sha; do check "$fixture" '.unsupported_files == []'; done
 
       - name: The bundle manifest covers hidden files and catches a missing one

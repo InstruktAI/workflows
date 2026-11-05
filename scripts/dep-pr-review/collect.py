@@ -243,7 +243,9 @@ class Change:
 
     @property
     def id(self) -> str:
-        digest = hashlib.sha256(json.dumps(self.new_pin, sort_keys=True).encode()).hexdigest()[:8]
+        # Both sides of the comparison: several old pins moving to one new
+        # pin are separate comparisons and get separate directories.
+        digest = hashlib.sha256(json.dumps([self.old_pin, self.new_pin], sort_keys=True).encode()).hexdigest()[:16]
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{self.ecosystem}-{self.name}-{self.new}")
         return f"{safe[:110]}-{digest}"
 
@@ -1021,7 +1023,9 @@ def collect(base: Path, head: Path, out: Path) -> dict:
     entries = []
     for change in changes:
         folder = out / change.id
-        folder.mkdir(parents=True, exist_ok=True)
+        if folder.exists():
+            raise SystemExit(f"two comparisons map to one bundle directory: {change.id}")
+        folder.mkdir(parents=True)
         entry = {"id": change.id, "ecosystem": change.ecosystem, "name": change.name,
                  "from": change.old, "to": change.new, "files": change.files}
         if change.ecosystem == "action":
