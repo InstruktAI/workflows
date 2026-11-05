@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "InstruktAI shared Renovate preset: green non-major updates auto-merge after a 3-day release age; security fixes skip the wait.",
+  "extends": ["config:recommended", ":semanticCommits"],
+  "automergeType": "pr",
+  "platformAutomerge": false,
+  "ignoreTests": false,
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "Non-major updates merge once every check on the PR is green.",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Major updates wait for a human.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "description": "Lock file maintenance carries no release timestamp, so minimumReleaseAge would hold it forever; it is exempt from the age gate and therefore not auto-merged.",
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "minimumReleaseAge": null,
+      "automerge": false
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "minimumReleaseAge": null
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 4am on monday"]
+  }
+}
