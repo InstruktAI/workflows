@@ -7,3 +7,8 @@ paths:
       # populated at run time; deps-audit fails closed when either is empty,
       # and self-test exercises that path.
       - 'property "workflow_(repository|sha)" is not defined'
+  .github/workflows/dep-pr-review.yml:
+    ignore:
+      # Same job-context properties: the tool is checked out from the
+      # commit this reusable workflow was loaded from.
+      - 'property "workflow_(repository|sha)" is not defined'

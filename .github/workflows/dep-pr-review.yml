@@ -1,0 +1,269 @@
+name: dep-pr-review
+
+# AI-assisted review of dependency update pull requests. For every updated
+# GitHub Action, crate, PyPI package and npm package it answers two questions:
+#
+#   provenance - is the new version the upstream project's official release?
+#                Decided by scripts (scripts/dep-pr-review/collect.py).
+#   sanity     - does the code change between the old and new published
+#                artifacts match the release notes? Decided by the model,
+#                which only judges what the scripts cannot.
+#
+# Trust boundary: the pull request and everything downloaded for it is
+# untrusted input (prompt injection included). The job that runs the model
+# has a read-only token, never persists it, never checks out the pull
+# request, and may only read the prepared bundle; its JSON is validated with
+# jq. Only the separate `report` job can write, and only a PR comment.
+#
+# Runs for pull requests opened by renovate[bot]; other pull requests only
+# with `review-all-authors: true`. When it does not run, its jobs are
+# skipped, which no check treats as a failure.
+
+on:
+  workflow_call:
+    inputs:
+      review-all-authors:
+        description: Also review pull requests not opened by renovate[bot]
+        type: boolean
+        default: false
+      base-dir:
+        description: Compare this directory of the checkout instead of the pull request's base (with head-dir; used by self-tests)
+        type: string
+        default: ''
+      head-dir:
+        description: Compare this directory of the checkout instead of the pull request's head (with base-dir)
+        type: string
+        default: ''
+      name:
+        description: Names the artifacts and the PR comment; set it when one run calls this workflow more than once
+        type: string
+        default: dep-pr-review
+    secrets:
+      claude_code_oauth_token:
+        description: Claude Code OAuth token for the model review; without it the review fails closed
+        required: false
+
+permissions: {}
+
+jobs:
+  collect:
+    name: provenance and diffs
+    if: >-
+      (inputs.base-dir != '' && inputs.head-dir != '') || (
+        github.event_name == 'pull_request' && (
+          github.event.pull_request.user.login == 'renovate[bot]' || inputs.review-all-authors
+        )
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      count: ${{ steps.collect.outputs.count }}
+    steps:
+      # The tool comes from the same commit as this workflow, never from the
+      # pull request.
+      - name: Check out dep-pr-review itself
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .dep-pr-review
+          sparse-checkout: scripts/dep-pr-review
+          persist-credentials: false
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src
+          fetch-depth: ${{ inputs.base-dir == '' && '0' || '1' }}
+          persist-credentials: false
+
+      # Both trees are exported as plain files; nothing in them is executed.
+      - name: Export the base and head trees
+        env:
+          BASE_DIR: ${{ inputs.base-dir }}
+          HEAD_DIR: ${{ inputs.head-dir }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trees/base" "$RUNNER_TEMP/trees/head"
+          if [ -n "$BASE_DIR" ]; then
+            cp -R "src/$BASE_DIR/." "$RUNNER_TEMP/trees/base/"
+            cp -R "src/$HEAD_DIR/." "$RUNNER_TEMP/trees/head/"
+          else
+            git -C src archive "$BASE_SHA" | tar -x -C "$RUNNER_TEMP/trees/base"
+            git -C src archive HEAD | tar -x -C "$RUNNER_TEMP/trees/head"
+          fi
+
+      - id: collect
+        name: Detect updates, check provenance, diff the published artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I .dep-pr-review/scripts/dep-pr-review/collect.py \
+            --base "$RUNNER_TEMP/trees/base" --head "$RUNNER_TEMP/trees/head" --out "$RUNNER_TEMP/bundle"
+          echo "count=$(jq '.dependencies | length' "$RUNNER_TEMP/bundle/summary.json")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.name }}-bundle
+          path: ${{ runner.temp }}/bundle
+          if-no-files-found: error
+          retention-days: 14
+
+  review:
+    name: code review (model)
+    needs: collect
+    if: needs.collect.outputs.count != '0'
+    runs-on: ubuntu-latest
+    # Read-only: this job reads untrusted text, so it must not be able to
+    # change anything even if the model is steered.
+    permissions:
+      contents: read
+    steps:
+      - name: Require the model token
+        env:
+          TOKEN: ${{ secrets.claude_code_oauth_token }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::no claude_code_oauth_token secret was passed; the review cannot run, so the pull request stays open"
+            exit 1
+          fi
+
+      # The workspace is this tool at the workflow's own commit plus the
+      # bundle; the pull request is never checked out here.
+      - name: Check out dep-pr-review itself
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: scripts/dep-pr-review
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.name }}-bundle
+          path: bundle
+
+      # Pinned the way InstruktAI/logging's release inspector pins it
+      # (.github/workflows/auto-release.yml). In agent mode (a `prompt`
+      # input) the action posts no tracking comment; actors ending in [bot]
+      # such as renovate[bot] pass its permission check
+      # (src/modes/detector.ts, src/github/validation/permissions.ts at this
+      # commit). Only Read, Glob and Grep are allowed: no shell, no network.
+      - id: review
+        name: Review the code changes
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
+          github_token: ${{ github.token }}
+          display_report: false
+          prompt: |
+            Follow scripts/dep-pr-review/prompt.md exactly. The bundle to review is in bundle/.
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Read,Glob,Grep"
+            --disallowedTools "Bash,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["sane","not_sane"]},"reasons":{"type":"array","items":{"type":"string"},"minItems":1},"findings":{"type":"array","items":{"type":"object","properties":{"dependency":{"type":"string"},"category":{"type":"string","enum":["network","secrets","install-script","obfuscation","notes-mismatch","provenance","other"]},"severity":{"type":"string","enum":["high","medium","low"]},"detail":{"type":"string"}},"required":["dependency","category","severity","detail"],"additionalProperties":false}}},"required":["verdict","reasons","findings"],"additionalProperties":false}'
+
+      # The action does not enforce the schema, so the full contract is
+      # checked here; anything else is no verdict at all.
+      - name: Validate the verdict
+        env:
+          RESULT: ${{ steps.review.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RESULT" > verdict.json
+          jq -e '
+            (keys == ["findings", "reasons", "verdict"])
+            and (.verdict | IN("sane", "not_sane"))
+            and (.reasons | type == "array" and length > 0 and all(type == "string"))
+            and (.findings | type == "array" and all(
+              type == "object"
+              and (keys == ["category", "dependency", "detail", "severity"])
+              and (.category | IN("network", "secrets", "install-script", "obfuscation", "notes-mismatch", "provenance", "other"))
+              and (.severity | IN("high", "medium", "low"))
+              and (.dependency | type == "string")
+              and (.detail | type == "string")))
+          ' verdict.json > /dev/null
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.name }}-verdict
+          path: verdict.json
+          if-no-files-found: error
+          retention-days: 14
+
+  report:
+    name: outcome
+    needs: [collect, review]
+    if: always() && needs.collect.result != 'skipped'
+    runs-on: ubuntu-latest
+    # The only job that writes, and only a PR comment.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out dep-pr-review itself
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: scripts/dep-pr-review
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.collect.result == 'success'
+        continue-on-error: true
+        with:
+          name: ${{ inputs.name }}-bundle
+          path: bundle
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.review.result == 'success'
+        continue-on-error: true
+        with:
+          name: ${{ inputs.name }}-verdict
+          path: verdict
+
+      - id: report
+        name: Decide and render the outcome
+        env:
+          NAME: ${{ inputs.name }}
+          COLLECT: ${{ needs.collect.result }}
+          REVIEW: ${{ needs.review.result }}
+        run: |
+          set +e
+          python3 -I scripts/dep-pr-review/report.py --name "$NAME" --collect "$COLLECT" --review "$REVIEW" \
+            --summary bundle/summary.json --verdict verdict/verdict.json --out comment.md
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      # One comment per review name, updated in place on every run.
+      - name: Post the outcome on the pull request
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          MARKER: '<!-- dep-pr-review:${{ inputs.name }} -->'
+        run: |
+          set -euo pipefail
+          existing=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\")))][0].id // empty" | head -n 1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@comment.md > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi
+
+      - name: Fail when the update is blocked
+        env:
+          STATUS: ${{ steps.report.outputs.status }}
+        run: |
+          if [ "$STATUS" != 0 ]; then
+            echo "::error::dependency update blocked; the reasons are in the PR comment and the job summary"
+            exit 1
+          fi
