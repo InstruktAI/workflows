@@ -1,0 +1,39 @@
+name: diag-model
+# Throwaway diagnostic, never merged: which part of the model step's
+# configuration makes Claude Code fail at startup.
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: bare, settings: '', args: ''}
+          - {case: schema, settings: '', args: "--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
+          - {case: tools, settings: '', args: "--tools \"Read,Glob,Grep\"\n--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
+          - {case: settings, settings: '{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Bash","Edit","Write","WebFetch","WebSearch","Read(./.git/**)","Read(./.git)"]}}', args: "--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
+          - {case: sources, settings: '', args: "--setting-sources user\n--disallowedTools \"mcp__*\"\n--json-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'"}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: run
+        continue-on-error: true
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          display_report: false
+          show_full_output: true
+          settings: ${{ matrix.settings }}
+          prompt: Reply with the single word hello.
+          claude_args: ${{ matrix.args }}
+      - env:
+          OUT: ${{ steps.run.outputs.structured_output }}
+          OUTCOME: ${{ steps.run.outcome }}
+          CASE: ${{ matrix.case }}
+        run: echo "case=$CASE outcome=$OUTCOME output=$OUT"
