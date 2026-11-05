@@ -1,0 +1,5 @@
+[project]
+name = "deps-audit-malicious"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["0requests==0.0.1"]
