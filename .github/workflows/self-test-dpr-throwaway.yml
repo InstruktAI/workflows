@@ -1,0 +1,22 @@
+name: self-test-dpr-throwaway
+
+# Throwaway test, never merged: the pull request updates a Cargo.lock that
+# .gitattributes marks export-ignore; dep-pr-review must still see it.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/dep-pr-review.yml
+    with:
+      review-all-authors: true
+      name: throwaway
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
