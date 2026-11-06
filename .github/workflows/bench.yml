@@ -10,6 +10,11 @@ name: bench
 # and take no token secret. Pull requests from forks get no OIDC token; the
 # CodSpeed runner then falls back to tokenless upload, which public
 # repositories allow. The repository must be imported at codspeed.io once.
+#
+# No input reaches shell text. The CodSpeed action interpolates its inputs
+# into bash, so it gets a constant `run`, a `mode` rebuilt from validated
+# words, and no `working-directory`: the directory and every argument travel
+# in the environment.
 
 on:
   workflow_call:
@@ -102,18 +107,27 @@ jobs:
         run: |
           # simulation and memory share one build of the benchmarks;
           # walltime needs another build and CodSpeed's macro runners.
+          # The output is rebuilt from the validated words only: it reaches
+          # the CodSpeed action, which interpolates it into bash.
           modes_csv=${MODE// /}
-          IFS=, read -ra modes <<< "$modes_csv"
+          case "$modes_csv" in
+            ''|*[!a-z,]*)
+              echo "::error::mode must be simulation, memory or simulation,memory"
+              exit 1 ;;
+          esac
+          IFS=, read -ra words <<< "$modes_csv"
+          modes=()
+          for m in "${words[@]}"; do
+            case "$m" in
+              simulation|memory) modes+=("$m") ;;
+              *) echo "::error::unsupported mode '$m'; use simulation, memory or simulation,memory"; exit 1 ;;
+            esac
+          done
           if [ "${#modes[@]}" -eq 0 ]; then
             echo "::error::mode is empty; use simulation, memory or simulation,memory"
             exit 1
           fi
-          for m in "${modes[@]}"; do
-            case "$m" in
-              simulation|memory) ;;
-              *) echo "::error::unsupported mode '$m'; use simulation, memory or simulation,memory"; exit 1 ;;
-            esac
-          done
+          modes_csv=$(IFS=,; echo "${modes[*]}")
           cargo=false python='' python_version_file=''
           if [ -f Cargo.toml ]; then cargo=true; fi
           if [ -f pyproject.toml ]; then
@@ -175,14 +189,20 @@ jobs:
           read -ra args <<< "$BUILD_ARGS"
           cargo codspeed build --measurement-mode "$MODE" "${args[@]}"
 
+      # The CodSpeed runner executes `run` with bash in this step's
+      # environment, once per mode, with CODSPEED_RUNNER_MODE set.
       - name: Run the benchmarks
         if: ${{ !inputs.build-only }}
         uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+        env:
+          BENCH_WORKDIR: ${{ inputs.working-directory }}
         with:
           mode: ${{ needs.detect.outputs.mode }}
-          working-directory: ${{ inputs.working-directory }}
-          # Runs what the build step produced, in each mode.
-          run: cargo codspeed run
+          # Runs what the build step produced.
+          run: |
+            set -euo pipefail
+            cd -- "$BENCH_WORKDIR"
+            cargo codspeed run
 
   python:
     name: python benchmarks
@@ -251,20 +271,24 @@ jobs:
           collected=$(grep '::' "$RUNNER_TEMP/collected.txt" | sort | paste -sd ' ' -)
           echo "collected=$collected" >> "$GITHUB_OUTPUT"
 
-      # The runner executes `run` with bash and this step's environment, so
-      # the inputs reach pytest as words, never as interpolated shell text.
+      # The CodSpeed runner executes `run` with bash in this step's
+      # environment, once per mode, so the inputs reach pytest as words,
+      # never as interpolated shell text.
       - name: Run the benchmarks
         if: ${{ !inputs.build-only }}
         uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
         env:
+          BENCH_WORKDIR: ${{ inputs.working-directory }}
           BENCH_PATHS: ${{ inputs.python-path }}
           BENCH_MARKER: ${{ inputs.python-marker }}
           BENCH_ARGS: ${{ inputs.python-args }}
         with:
           mode: ${{ needs.detect.outputs.mode }}
-          working-directory: ${{ inputs.working-directory }}
-          run: >-
-            read -ra paths <<< "$BENCH_PATHS";
-            read -ra extra <<< "$BENCH_ARGS";
-            uv run --no-sync pytest "${paths[@]}" --codspeed
-            ${BENCH_MARKER:+-m "$BENCH_MARKER"} "${extra[@]}"
+          run: |
+            set -euo pipefail
+            cd -- "$BENCH_WORKDIR"
+            read -ra paths <<< "$BENCH_PATHS"
+            read -ra extra <<< "$BENCH_ARGS"
+            marker=()
+            if [ -n "$BENCH_MARKER" ]; then marker=(-m "$BENCH_MARKER"); fi
+            uv run --no-sync pytest "${paths[@]}" --codspeed "${marker[@]}" "${extra[@]}"
