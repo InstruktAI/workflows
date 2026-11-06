@@ -170,11 +170,12 @@ jobs:
           toolchain: stable
 
       # Caches the build and ~/.cargo/bin, so cargo-codspeed is compiled once
-      # per version. Its own key keeps it apart from the caller's CI caches.
+      # per version: the version is in the key, so a new one never restores
+      # the old binary. Its own key keeps it apart from the caller's CI caches.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ${{ inputs.working-directory }}
-          key: codspeed
+          key: codspeed-${{ inputs.cargo-codspeed-version }}
 
       # Built from crates.io at an exact version with its own lockfile, rather
       # than a prebuilt binary. `+stable` so a repo's rust-toolchain.toml
