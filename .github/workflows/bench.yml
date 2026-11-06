@@ -112,6 +112,13 @@ jobs:
           MODE: ${{ inputs.mode }}
           WORKDIR: ${{ inputs.working-directory }}
         run: |
+          # The directory reaches $GITHUB_OUTPUT below: a line break in it
+          # would add records that overwrite the detected outputs.
+          case "$WORKDIR" in
+            *$'\n'*|*$'\r'*)
+              echo "::error::working-directory must not contain a line break"
+              exit 1 ;;
+          esac
           # simulation and memory share one build of the benchmarks;
           # walltime needs another build and CodSpeed's macro runners.
           # The output is rebuilt from the validated words only: it reaches
