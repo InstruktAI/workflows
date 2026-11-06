@@ -9,6 +9,9 @@ name: self-test-bench
 # workspace default member; pytest-codspeed installs from the lock and selects
 # exactly the benchmarks the inputs ask for, under a pytest config whose
 # addopts holds -q. No job grants id-token: bench.yml uploads tokenless.
+# detect-guard runs bench.yml's own detect script directly: a reusable-workflow
+# job cannot be expected to fail, so the rejection of a working-directory with
+# a line break is tested on the extracted script instead.
 
 on:
   pull_request:
@@ -78,3 +81,15 @@ jobs:
           # node ids survive the fixture's addopts -q
           check python-collected "$COLLECTED" 'benchmarks/test_fixture.py::test_sum'
           exit "$status"
+
+  detect-guard:
+    name: detect rejects a working-directory with a line break
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run bench.yml's detect script against hostile and valid directories
+        run: |
+          yq '.jobs.detect.steps[] | select(.id == "detect") | .run' .github/workflows/bench.yml > "$RUNNER_TEMP/detect.sh"
+          python3 test/bench/detect_guard.py "$RUNNER_TEMP/detect.sh"
