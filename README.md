@@ -298,40 +298,44 @@ builds and then runs `cargo codspeed run` once per mode, uninstrumented;
 Python installs and collects. `self-test-bench.yml` uses it, since CodSpeed
 has not imported this repository.
 
-Auth is OIDC: the benchmark jobs need `id-token: write` and take no token
-secret. A pull request from a fork gets no OIDC token; the CodSpeed runner
-then uploads tokenless, which public repositories allow.
+For public repositories only. Uploads are tokenless, which CodSpeed accepts
+from public repositories ("CodSpeed allows tokenless uploads for public
+repositories, allowing runs to be triggered from public forks directly",
+[CodSpeed docs](https://codspeed.io/docs/integrations/ci/github-actions/configuration#tokenless)).
+`bench.yml` needs no secrets and requests no OIDC permission: its jobs hold
+`contents: read` and nothing else, so the caller grants no `id-token: write`.
+CodSpeed recommends OIDC, but with it the benchmark code, its build scripts and
+pytest collection could mint OIDC tokens for any audience, and a pull request
+from a fork runs that code. Pull requests from forks of a public repository
+are benchmarked and reported like any other.
 
 One-time setup (org admin): import the repository at
 [codspeed.io](https://codspeed.io), which installs the CodSpeed GitHub App on
 it. Do this before adding the workflow; without it CodSpeed has no project to
 report against.
 
-Keep all three triggers: `push` to the default branch records the baseline
-pull requests are compared against, and `workflow_dispatch` lets CodSpeed
-backtest earlier commits.
+Trigger on `pull_request` and on `push` to the default branch: the push runs
+record the baseline pull requests are compared against. A
+`workflow_dispatch` trigger may be added to let CodSpeed backtest earlier
+commits. The caller for InstruktAI/logging:
 
 ```yaml
+name: bench
+
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   bench:
-    permissions:
-      contents: read
-      id-token: write
     uses: InstruktAI/workflows/.github/workflows/bench.yml@v1
-    # with:
-    #   rust-selectors: -p my-crate --bench writer
-    #   python-path: benchmarks
-    #   python-marker: not slow
-    #   mode: simulation,memory
+    with:
+      rust-selectors: -p instrukt-ai-logging --bench writer
+      python-path: benchmarks
 ```
 
 ## Releasing this repository

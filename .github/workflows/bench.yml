@@ -6,10 +6,13 @@ name: bench
 # default branch and reports regressions on the PR. Ecosystems are detected in
 # the caller's `working-directory`, like deps-audit.yml.
 #
-# Auth is OIDC: the benchmark jobs need `contents: read` and `id-token: write`
-# and take no token secret. Pull requests from forks get no OIDC token; the
-# CodSpeed runner then falls back to tokenless upload, which public
-# repositories allow. The repository must be imported at codspeed.io once.
+# For public repositories only. Uploads are tokenless, which CodSpeed accepts
+# from public repositories, forks included
+# (codspeed.io/docs/integrations/ci/github-actions/configuration#tokenless):
+# no secret, and no `id-token: write`. With OIDC available, the benchmark code,
+# its build scripts and pytest collection could mint tokens for any audience,
+# and a pull request from a fork runs that code. The repository must be
+# imported at codspeed.io once.
 #
 # No input reaches shell text. The CodSpeed action interpolates its inputs
 # into bash, so it gets a constant `run`, a `mode` rebuilt from validated
@@ -157,9 +160,6 @@ jobs:
     needs: detect
     if: needs.detect.outputs.cargo == 'true' && inputs.rust
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # OIDC authentication with CodSpeed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -259,9 +259,6 @@ jobs:
     needs: detect
     if: needs.detect.outputs.python != '' && inputs.python
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # OIDC authentication with CodSpeed
     outputs:
       collected: ${{ steps.collect.outputs.collected }}
     steps:

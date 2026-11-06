@@ -2,13 +2,13 @@ name: self-test-bench
 
 # Runs bench.yml from this commit against the fixtures under
 # test/fixtures/bench-*, in build-only mode: CodSpeed has not imported this
-# repository, so nothing is run under CodSpeed or uploaded. What it proves:
+# repository, so nothing runs under CodSpeed or is uploaded. What it proves:
 # detection and mode validation; the pinned cargo-codspeed builds the selected
 # bench targets in simulation and memory mode, and `cargo codspeed run` finds
 # them through the same selectors, also when the benchmark package is not a
 # workspace default member; pytest-codspeed installs from the lock and selects
 # exactly the benchmarks the inputs ask for, under a pytest config whose
-# addopts holds -q.
+# addopts holds -q. No job grants id-token: bench.yml uploads tokenless.
 
 on:
   pull_request:
@@ -21,11 +21,6 @@ permissions:
 
 jobs:
   cargo:
-    # bench.yml's jobs request id-token: write, so the caller must grant it.
-    # build-only never reaches the CodSpeed step that would use it.
-    permissions:
-      contents: read
-      id-token: write
     uses: ./.github/workflows/bench.yml
     with:
       working-directory: test/fixtures/bench-cargo
@@ -34,9 +29,6 @@ jobs:
       rust-selectors: -p bench-fixture --bench fixture
 
   cargo-workspace:
-    permissions:
-      contents: read
-      id-token: write
     uses: ./.github/workflows/bench.yml
     with:
       working-directory: test/fixtures/bench-cargo-workspace
@@ -47,9 +39,6 @@ jobs:
       rust-build-args: --locked
 
   uv:
-    permissions:
-      contents: read
-      id-token: write
     uses: ./.github/workflows/bench.yml
     with:
       working-directory: test/fixtures/bench-uv
