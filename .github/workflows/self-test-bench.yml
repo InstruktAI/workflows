@@ -5,7 +5,8 @@ name: self-test-bench
 # repository, so nothing is run under CodSpeed or uploaded. What it proves:
 # detection and mode validation, the pinned cargo-codspeed installs and builds
 # the selected bench target in simulation and memory mode, and pytest-codspeed
-# installs from the lock and selects exactly the benchmarks the inputs ask for.
+# installs from the lock and selects exactly the benchmarks the inputs ask for,
+# under a pytest config whose addopts holds -q.
 
 on:
   pull_request:
@@ -65,6 +66,7 @@ jobs:
           check uv-cargo "$UV_CARGO" false
           check python "$PYTHON" uv
           check uv-mode "$UV_MODE" simulation
-          # the plain test is not a benchmark, the slow one is excluded by -m
+          # the plain test is not a benchmark, the slow one is excluded by -m;
+          # node ids survive the fixture's addopts -q
           check python-collected "$COLLECTED" 'benchmarks/test_fixture.py::test_sum'
           exit "$status"

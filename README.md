@@ -277,11 +277,12 @@ detected in `working-directory`, as in `deps-audit.yml`; each gets its own job:
 | Rust | `Cargo.toml` | installs `cargo-codspeed` (`cargo install --locked`, exact `cargo-codspeed-version`), `cargo codspeed build <rust-build-args>`, then `cargo codspeed run` under CodSpeed. Benchmarks use `codspeed-divan-compat` (or the criterion/bencher compat crates). |
 | Python | `pyproject.toml` and `uv.lock` (no `uv.lock` fails) | Python from `actions/setup-python`, which CodSpeed requires for tracing (`python-version`, else `.python-version`, else `requires-python`), `uv sync --locked <uv-sync-args>` on that interpreter, then `pytest <python-path> --codspeed [-m <python-marker>] <python-args>` under CodSpeed. `pytest-codspeed` must be in the synced groups (default `--group dev`). |
 
-The Python job first collects the selection with `--collect-only`, so a
-missing `pytest-codspeed` or a selection with no benchmark fails before
-CodSpeed runs. Under `--codspeed` only benchmark tests (`@pytest.mark.benchmark`
-or the `benchmark` fixture) are selected, so `python-path` may point at the
-whole test tree.
+The Python job first collects the selection, reading the node ids from a
+pytest collection hook rather than from `--collect-only` output, so `-q` in
+the caller's `addopts` changes nothing. A missing `pytest-codspeed` or a
+selection with no benchmark fails before CodSpeed runs. Under `--codspeed`
+only benchmark tests (`@pytest.mark.benchmark` or the `benchmark` fixture) are
+selected, so `python-path` may point at the whole test tree.
 
 `mode` is `simulation` (default), `memory`, or `simulation,memory` (both
 instruments, one build). `walltime` is refused: it needs CodSpeed's macro

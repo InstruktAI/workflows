@@ -253,6 +253,9 @@ jobs:
 
       # Fails fast, before CodSpeed, when pytest-codspeed is missing or the
       # selection holds no benchmark (pytest exits 5 on an empty selection).
+      # The node ids come from a collection hook, after pytest-codspeed and
+      # -m have deselected, never from terminal output that the caller's
+      # addopts (-q, -qq) reshape.
       - id: collect
         name: Collect the benchmarks
         working-directory: ${{ inputs.working-directory }}
@@ -261,14 +264,32 @@ jobs:
           BENCH_MARKER: ${{ inputs.python-marker }}
           BENCH_ARGS: ${{ inputs.python-args }}
         run: |
-          set -o pipefail
+          plugin_dir="$RUNNER_TEMP/bench-collect"
+          mkdir -p "$plugin_dir"
+          cat > "$plugin_dir/instruktai_bench_collect.py" <<'PY'
+          import os
+
+
+          def pytest_collection_finish(session):
+              with open(os.environ["BENCH_COLLECTED_FILE"], "w", encoding="utf-8") as out:
+                  for item in session.items:
+                      out.write(item.nodeid + "\n")
+          PY
+          export BENCH_COLLECTED_FILE="$RUNNER_TEMP/collected.txt"
+          rm -f "$BENCH_COLLECTED_FILE"
           read -ra paths <<< "$BENCH_PATHS"
           read -ra extra <<< "$BENCH_ARGS"
           marker=()
           if [ -n "$BENCH_MARKER" ]; then marker=(-m "$BENCH_MARKER"); fi
-          uv run --no-sync pytest "${paths[@]}" --codspeed "${marker[@]}" "${extra[@]}" \
-            --collect-only -q | tee "$RUNNER_TEMP/collected.txt"
-          collected=$(grep '::' "$RUNNER_TEMP/collected.txt" | sort | paste -sd ' ' -)
+          PYTHONPATH="$plugin_dir${PYTHONPATH:+:$PYTHONPATH}" \
+            uv run --no-sync pytest -p instruktai_bench_collect \
+            "${paths[@]}" --codspeed "${marker[@]}" "${extra[@]}" --collect-only
+          if [ ! -s "$BENCH_COLLECTED_FILE" ]; then
+            echo "::error::no benchmark collected (the collection hook wrote nothing)"
+            exit 1
+          fi
+          cat "$BENCH_COLLECTED_FILE"
+          collected=$(sort "$BENCH_COLLECTED_FILE" | paste -sd ' ' -)
           echo "collected=$collected" >> "$GITHUB_OUTPUT"
 
       # The CodSpeed runner executes `run` with bash in this step's
