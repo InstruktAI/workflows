@@ -1,0 +1,95 @@
+name: self-test-bench
+
+# Runs bench.yml from this commit against the fixtures under
+# test/fixtures/bench-*, in build-only mode: CodSpeed has not imported this
+# repository, so nothing runs under CodSpeed or is uploaded. What it proves:
+# detection and mode validation; the pinned cargo-codspeed builds the selected
+# bench targets in simulation and memory mode, and `cargo codspeed run` finds
+# them through the same selectors, also when the benchmark package is not a
+# workspace default member; pytest-codspeed installs from the lock and selects
+# exactly the benchmarks the inputs ask for, under a pytest config whose
+# addopts holds -q. No job grants id-token: bench.yml uploads tokenless.
+# detect-guard runs bench.yml's own detect script directly: a reusable-workflow
+# job cannot be expected to fail, so the rejection of a working-directory with
+# a line break is tested on the extracted script instead.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    uses: ./.github/workflows/bench.yml
+    with:
+      working-directory: test/fixtures/bench-cargo
+      mode: simulation, memory
+      build-only: true
+      rust-selectors: -p bench-fixture --bench fixture
+
+  cargo-workspace:
+    uses: ./.github/workflows/bench.yml
+    with:
+      working-directory: test/fixtures/bench-cargo-workspace
+      build-only: true
+      # bench-ws-member is not a default member: without these selectors
+      # `cargo codspeed run` finds no benchmark. --locked is build-only.
+      rust-selectors: -p bench-ws-member --bench member
+      rust-build-args: --locked
+
+  uv:
+    uses: ./.github/workflows/bench.yml
+    with:
+      working-directory: test/fixtures/bench-uv
+      build-only: true
+      python-path: benchmarks
+      python-marker: not slow
+      python-args: -p no:cacheprovider
+
+  detection:
+    needs: [cargo, cargo-workspace, uv]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert detection and benchmark selection
+        env:
+          CARGO: ${{ needs.cargo.outputs.cargo }}
+          CARGO_PYTHON: ${{ needs.cargo.outputs.python }}
+          CARGO_MODE: ${{ needs.cargo.outputs.mode }}
+          WORKSPACE_CARGO: ${{ needs.cargo-workspace.outputs.cargo }}
+          WORKSPACE_MODE: ${{ needs.cargo-workspace.outputs.mode }}
+          UV_CARGO: ${{ needs.uv.outputs.cargo }}
+          PYTHON: ${{ needs.uv.outputs.python }}
+          UV_MODE: ${{ needs.uv.outputs.mode }}
+          COLLECTED: ${{ needs.uv.outputs.python-collected }}
+        run: |
+          status=0
+          check() { if [ "$2" != "$3" ]; then echo "::error::$1: expected '$3', got '$2'"; status=1; fi; }
+          check cargo "$CARGO" true
+          check cargo-python "$CARGO_PYTHON" ''
+          # spaces are dropped, the list is kept
+          check cargo-mode "$CARGO_MODE" simulation,memory
+          check workspace-cargo "$WORKSPACE_CARGO" true
+          check workspace-mode "$WORKSPACE_MODE" simulation
+          check uv-cargo "$UV_CARGO" false
+          check python "$PYTHON" uv
+          check uv-mode "$UV_MODE" simulation
+          # the plain test is not a benchmark, the slow one is excluded by -m;
+          # node ids survive the fixture's addopts -q
+          check python-collected "$COLLECTED" 'benchmarks/test_fixture.py::test_sum'
+          exit "$status"
+
+  detect-guard:
+    name: detect rejects a working-directory with a line break
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run bench.yml's detect script against hostile and valid directories
+        run: |
+          yq '.jobs.detect.steps[] | select(.id == "detect") | .run' .github/workflows/bench.yml > "$RUNNER_TEMP/detect.sh"
+          python3 test/bench/detect_guard.py "$RUNNER_TEMP/detect.sh"

@@ -1,0 +1,369 @@
+name: bench
+
+# CodSpeed benchmarks for Rust (cargo-codspeed) and Python (pytest-codspeed),
+# measured in CodSpeed's CPU simulation mode (optionally also memory). Results
+# are uploaded to CodSpeed, which compares each pull request against the
+# default branch and reports regressions on the PR. Ecosystems are detected in
+# the caller's `working-directory`, like deps-audit.yml.
+#
+# For public repositories only. Uploads are tokenless, which CodSpeed accepts
+# from public repositories, forks included
+# (codspeed.io/docs/integrations/ci/github-actions/configuration#tokenless):
+# no secret, and no `id-token: write`. With OIDC available, the benchmark code,
+# its build scripts and pytest collection could mint tokens for any audience,
+# and a pull request from a fork runs that code. The repository must be
+# imported at codspeed.io once.
+#
+# No input reaches shell text. The CodSpeed action interpolates its inputs
+# into bash, so it gets a constant `run`, a `mode` rebuilt from validated
+# words, and no `working-directory`: the directory and every argument travel
+# in the environment.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory holding the project manifests, relative to the repo root
+        type: string
+        default: '.'
+      mode:
+        description: "CodSpeed measurement mode(s): simulation, memory, or simulation,memory. walltime needs CodSpeed macro runners and is not offered."
+        type: string
+        default: simulation
+      build-only:
+        description: "Skip CodSpeed and upload nothing: Rust builds, then runs `cargo codspeed run` once per mode uninstrumented; Python installs and collects. For checks in a repository CodSpeed has not imported."
+        type: boolean
+        default: false
+      rust:
+        description: Run the Rust benchmarks when Cargo.toml exists
+        type: boolean
+        default: true
+      rust-selectors:
+        description: "Package and bench target selection passed to both `cargo codspeed build` and `cargo codspeed run`: `-p`/`--package`, `--bench`, `--workspace`, `--exclude`, e.g. `-p my-crate --bench writer`; empty selects the workspace default members' bench targets"
+        type: string
+        default: ''
+      rust-build-args:
+        description: "Extra flags for `cargo codspeed build` only, e.g. `--features simd --locked`; selectors belong in rust-selectors and are refused here"
+        type: string
+        default: ''
+      cargo-codspeed-version:
+        description: cargo-codspeed version installed with `cargo install --locked`
+        type: string
+        default: '6.0.0'
+      python:
+        description: Run the Python benchmarks when pyproject.toml exists
+        type: boolean
+        default: true
+      python-path:
+        description: "Test paths passed to pytest, space-separated, e.g. `benchmarks`; empty uses pytest's configured testpaths. Under --codspeed pytest-codspeed runs only benchmark tests."
+        type: string
+        default: ''
+      python-marker:
+        description: "pytest marker expression passed as -m, e.g. `not slow`; empty selects every benchmark"
+        type: string
+        default: ''
+      python-args:
+        description: Extra pytest arguments, space-separated
+        type: string
+        default: ''
+      python-version:
+        description: Python version for actions/setup-python; empty reads .python-version, else requires-python in pyproject.toml
+        type: string
+        default: ''
+      uv-sync-args:
+        description: "Arguments to `uv sync --locked`; the selected groups must provide pytest-codspeed"
+        type: string
+        default: '--group dev'
+    outputs:
+      cargo:
+        description: "'true' when Cargo.toml was found"
+        value: ${{ jobs.detect.outputs.cargo }}
+      python:
+        description: "'uv' when pyproject.toml and uv.lock were found"
+        value: ${{ jobs.detect.outputs.python }}
+      mode:
+        description: The validated measurement mode(s), comma-separated
+        value: ${{ jobs.detect.outputs.mode }}
+      python-collected:
+        description: The pytest node ids selected as benchmarks, space-separated
+        value: ${{ jobs.python.outputs.collected }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: detect ecosystems
+    runs-on: ubuntu-latest
+    outputs:
+      cargo: ${{ steps.detect.outputs.cargo }}
+      python: ${{ steps.detect.outputs.python }}
+      python-version-file: ${{ steps.detect.outputs.python-version-file }}
+      mode: ${{ steps.detect.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: detect
+        name: Detect ecosystems and validate the mode
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          MODE: ${{ inputs.mode }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          # The directory reaches $GITHUB_OUTPUT below: a line break in it
+          # would add records that overwrite the detected outputs.
+          case "$WORKDIR" in
+            *$'\n'*|*$'\r'*)
+              echo "::error::working-directory must not contain a line break"
+              exit 1 ;;
+          esac
+          # simulation and memory share one build of the benchmarks;
+          # walltime needs another build and CodSpeed's macro runners.
+          # The output is rebuilt from the validated words only: it reaches
+          # the CodSpeed action, which interpolates it into bash.
+          modes_csv=${MODE// /}
+          case "$modes_csv" in
+            ''|*[!a-z,]*)
+              echo "::error::mode must be simulation, memory or simulation,memory"
+              exit 1 ;;
+          esac
+          IFS=, read -ra words <<< "$modes_csv"
+          modes=()
+          for m in "${words[@]}"; do
+            case "$m" in
+              simulation|memory) modes+=("$m") ;;
+              *) echo "::error::unsupported mode '$m'; use simulation, memory or simulation,memory"; exit 1 ;;
+            esac
+          done
+          if [ "${#modes[@]}" -eq 0 ]; then
+            echo "::error::mode is empty; use simulation, memory or simulation,memory"
+            exit 1
+          fi
+          modes_csv=$(IFS=,; echo "${modes[*]}")
+          cargo=false python='' python_version_file=''
+          if [ -f Cargo.toml ]; then cargo=true; fi
+          if [ -f pyproject.toml ]; then
+            # uv sync --locked installs the locked set; an unlocked project fails closed.
+            if [ -f uv.lock ]; then python=uv; else python=unlocked; fi
+            # setup-python resolves the file against the repo root.
+            if [ -f .python-version ]; then
+              python_version_file="$WORKDIR/.python-version"
+            else
+              python_version_file="$WORKDIR/pyproject.toml"
+            fi
+          fi
+          {
+            echo "cargo=$cargo"
+            echo "python=$python"
+            echo "python-version-file=$python_version_file"
+            echo "mode=$modes_csv"
+          } >> "$GITHUB_OUTPUT"
+          echo "cargo=$cargo python=${python:-none} mode=$modes_csv"
+
+  rust:
+    name: rust benchmarks
+    needs: detect
+    if: needs.detect.outputs.cargo == 'true' && inputs.rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+
+      # Caches the build and ~/.cargo/bin, so cargo-codspeed is compiled once
+      # per version: the version is in the key, so a new one never restores
+      # the old binary. Its own key keeps it apart from the caller's CI caches.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ${{ inputs.working-directory }}
+          key: codspeed-${{ inputs.cargo-codspeed-version }}
+
+      # Built from crates.io at an exact version with its own lockfile, rather
+      # than a prebuilt binary. `+stable` so a repo's rust-toolchain.toml
+      # below cargo-codspeed's MSRV cannot break the install.
+      - name: Install cargo-codspeed
+        env:
+          VERSION: ${{ inputs.cargo-codspeed-version }}
+        run: cargo +stable install cargo-codspeed --locked --version "$VERSION"
+
+      # `cargo codspeed run` picks the benchmarks by its own -p/--bench, and
+      # without them by the workspace default members, whatever the build
+      # selected. So the selectors go to both commands, and build-only flags
+      # (which `run` refuses) to the build alone.
+      - name: Build the benchmarks
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          MODE: ${{ needs.detect.outputs.mode }}
+          RUST_SELECTORS: ${{ inputs.rust-selectors }}
+          BUILD_ARGS: ${{ inputs.rust-build-args }}
+        run: |
+          read -ra selectors <<< "$RUST_SELECTORS"
+          read -ra args <<< "$BUILD_ARGS"
+          n=${#selectors[@]}
+          for ((i = 0; i < n; i++)); do
+            case "${selectors[i]}" in
+              --workspace|--package=?*|--bench=?*|--exclude=?*) ;;
+              -p|--package|--bench|--exclude)
+                next=${selectors[i + 1]:-}
+                if [ -z "$next" ] || [ "${next#-}" != "$next" ]; then
+                  echo "::error::rust-selectors: ${selectors[i]} needs a value"
+                  exit 1
+                fi
+                i=$((i + 1)) ;;
+              *)
+                echo "::error::rust-selectors: '${selectors[i]}' is not a selector; it takes -p/--package, --bench, --workspace and --exclude, build flags go in rust-build-args"
+                exit 1 ;;
+            esac
+          done
+          for a in "${args[@]}"; do
+            case "$a" in
+              -p*|--package|--package=*|--bench|--bench=*|--workspace|--exclude|--exclude=*)
+                echo "::error::rust-build-args: '$a' selects benchmarks; put it in rust-selectors, so cargo codspeed run selects the same ones"
+                exit 1 ;;
+            esac
+          done
+          cargo codspeed build --measurement-mode "$MODE" "${selectors[@]}" "${args[@]}"
+
+      # The CodSpeed runner executes `run` with bash in this step's
+      # environment, once per mode, with CODSPEED_RUNNER_MODE set.
+      - name: Run the benchmarks
+        if: ${{ !inputs.build-only }}
+        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+        env:
+          BENCH_WORKDIR: ${{ inputs.working-directory }}
+          RUST_SELECTORS: ${{ inputs.rust-selectors }}
+        with:
+          mode: ${{ needs.detect.outputs.mode }}
+          run: |
+            set -euo pipefail
+            cd -- "$BENCH_WORKDIR"
+            read -ra selectors <<< "$RUST_SELECTORS"
+            cargo codspeed run "${selectors[@]}"
+
+      # Without CodSpeed the benchmarks run once, uninstrumented, through the
+      # same `cargo codspeed run` selection; nothing is measured or uploaded.
+      - name: Run the benchmarks without CodSpeed (build-only)
+        if: ${{ inputs.build-only }}
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          MODE: ${{ needs.detect.outputs.mode }}
+          RUST_SELECTORS: ${{ inputs.rust-selectors }}
+        run: |
+          read -ra selectors <<< "$RUST_SELECTORS"
+          IFS=, read -ra modes <<< "$MODE"
+          for m in "${modes[@]}"; do
+            cargo codspeed run --measurement-mode "$m" "${selectors[@]}"
+          done
+
+  python:
+    name: python benchmarks
+    needs: detect
+    if: needs.detect.outputs.python != '' && inputs.python
+    runs-on: ubuntu-latest
+    outputs:
+      collected: ${{ steps.collect.outputs.collected }}
+    steps:
+      - name: Require a lockfile
+        if: needs.detect.outputs.python == 'unlocked'
+        run: |
+          echo "::error::pyproject.toml without uv.lock: the benchmarks run on the locked dependency set. Commit uv.lock, or set python: false."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # CodSpeed requires an actions/setup-python interpreter, not a
+      # uv-managed one, for its tracing to work
+      # (codspeed.io/docs/benchmarks/python).
+      - id: setup-python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          python-version-file: ${{ inputs.python-version == '' && needs.detect.outputs.python-version-file || '' }}
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Install the locked dependencies
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PYTHON_PATH: ${{ steps.setup-python.outputs.python-path }}
+          SYNC_ARGS: ${{ inputs.uv-sync-args }}
+        # Pin uv to that interpreter for this and every later step, the
+        # CodSpeed run included; never let it download its own.
+        run: |
+          {
+            echo "UV_PYTHON=$PYTHON_PATH"
+            echo "UV_PYTHON_DOWNLOADS=never"
+          } >> "$GITHUB_ENV"
+          read -ra args <<< "$SYNC_ARGS"
+          UV_PYTHON=$PYTHON_PATH UV_PYTHON_DOWNLOADS=never uv sync --locked "${args[@]}"
+
+      # Fails fast, before CodSpeed, when pytest-codspeed is missing or the
+      # selection holds no benchmark (pytest exits 5 on an empty selection).
+      # The node ids come from a collection hook, after pytest-codspeed and
+      # -m have deselected, never from terminal output that the caller's
+      # addopts (-q, -qq) reshape.
+      - id: collect
+        name: Collect the benchmarks
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          BENCH_PATHS: ${{ inputs.python-path }}
+          BENCH_MARKER: ${{ inputs.python-marker }}
+          BENCH_ARGS: ${{ inputs.python-args }}
+        run: |
+          plugin_dir="$RUNNER_TEMP/bench-collect"
+          mkdir -p "$plugin_dir"
+          cat > "$plugin_dir/instruktai_bench_collect.py" <<'PY'
+          import os
+
+
+          def pytest_collection_finish(session):
+              with open(os.environ["BENCH_COLLECTED_FILE"], "w", encoding="utf-8") as out:
+                  for item in session.items:
+                      out.write(item.nodeid + "\n")
+          PY
+          export BENCH_COLLECTED_FILE="$RUNNER_TEMP/collected.txt"
+          rm -f "$BENCH_COLLECTED_FILE"
+          read -ra paths <<< "$BENCH_PATHS"
+          read -ra extra <<< "$BENCH_ARGS"
+          marker=()
+          if [ -n "$BENCH_MARKER" ]; then marker=(-m "$BENCH_MARKER"); fi
+          PYTHONPATH="$plugin_dir${PYTHONPATH:+:$PYTHONPATH}" \
+            uv run --no-sync pytest -p instruktai_bench_collect \
+            "${paths[@]}" --codspeed "${marker[@]}" "${extra[@]}" --collect-only
+          if [ ! -s "$BENCH_COLLECTED_FILE" ]; then
+            echo "::error::no benchmark collected (the collection hook wrote nothing)"
+            exit 1
+          fi
+          cat "$BENCH_COLLECTED_FILE"
+          collected=$(sort "$BENCH_COLLECTED_FILE" | paste -sd ' ' -)
+          echo "collected=$collected" >> "$GITHUB_OUTPUT"
+
+      # The CodSpeed runner executes `run` with bash in this step's
+      # environment, once per mode, so the inputs reach pytest as words,
+      # never as interpolated shell text.
+      - name: Run the benchmarks
+        if: ${{ !inputs.build-only }}
+        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+        env:
+          BENCH_WORKDIR: ${{ inputs.working-directory }}
+          BENCH_PATHS: ${{ inputs.python-path }}
+          BENCH_MARKER: ${{ inputs.python-marker }}
+          BENCH_ARGS: ${{ inputs.python-args }}
+        with:
+          mode: ${{ needs.detect.outputs.mode }}
+          run: |
+            set -euo pipefail
+            cd -- "$BENCH_WORKDIR"
+            read -ra paths <<< "$BENCH_PATHS"
+            read -ra extra <<< "$BENCH_ARGS"
+            marker=()
+            if [ -n "$BENCH_MARKER" ]; then marker=(-m "$BENCH_MARKER"); fi
+            uv run --no-sync pytest "${paths[@]}" --codspeed "${marker[@]}" "${extra[@]}"

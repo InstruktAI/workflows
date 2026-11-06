@@ -1,0 +1,13 @@
+[package]
+name = "bench-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dev-dependencies]
+divan = { package = "codspeed-divan-compat", version = "6" }
+
+[[bench]]
+name = "fixture"
+harness = false

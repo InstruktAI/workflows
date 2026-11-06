@@ -24,10 +24,11 @@ toolchain, pipelines just push buttons.
 | `deploy-cloudflare.yml`| Build and deploy `dist/` to a Cloudflare Pages project |
 | `deps-audit.yml`       | Dependency safety gates, auto-detected per ecosystem (see below) |
 | `dep-pr-review.yml`    | Provenance and AI code review of each dependency a Renovate PR updates (see below) |
+| `bench.yml`            | CodSpeed benchmarks (Rust, Python) with regression reports on PRs (see below) |
 
 This repo's own workflows, not for callers: `release.yml` (releases this
 repo, see "Releasing"), `actionlint.yml`, `self-test.yml`,
-`self-test-dep-pr-review.yml`.
+`self-test-dep-pr-review.yml`, `self-test-bench.yml`.
 
 Shared config, not workflows:
 
@@ -261,6 +262,81 @@ resolutions, `docker://` actions. Changes to `go.sum`, `yarn.lock`,
 pins (`.nvmrc`, `rust-toolchain`, ...) block too. Repository-local entries
 (path, editable, workspace members, `./` actions) are part of the PR itself
 and are not treated as dependencies.
+
+## Benchmarks: `bench.yml`
+
+Runs a repository's [CodSpeed](https://codspeed.io) benchmarks in CPU
+simulation mode and uploads the results. CodSpeed compares every pull request
+with the latest run on the default branch and reports regressions on the PR.
+Simulation counts instructions under emulation instead of timing them, so
+results on shared hosted runners stay stable enough to compare. Ecosystems are
+detected in `working-directory`, as in `deps-audit.yml`; each gets its own job:
+
+| Ecosystem | Runs when | Does |
+| --------- | --------- | ---- |
+| Rust | `Cargo.toml` | installs `cargo-codspeed` (`cargo install --locked`, exact `cargo-codspeed-version`), `cargo codspeed build <rust-selectors> <rust-build-args>`, then `cargo codspeed run <rust-selectors>` under CodSpeed. Benchmarks use `codspeed-divan-compat` (or the criterion/bencher compat crates). |
+| Python | `pyproject.toml` and `uv.lock` (no `uv.lock` fails) | Python from `actions/setup-python`, which CodSpeed requires for tracing (`python-version`, else `.python-version`, else `requires-python`), `uv sync --locked <uv-sync-args>` on that interpreter, then `pytest <python-path> --codspeed [-m <python-marker>] <python-args>` under CodSpeed. `pytest-codspeed` must be in the synced groups (default `--group dev`). |
+
+`rust-selectors` takes only `-p`/`--package`, `--bench`, `--workspace` and
+`--exclude`, and goes to both commands: `cargo codspeed run` selects by its
+own flags, and without them runs the workspace default members' benchmarks,
+whatever the build selected. Build-only flags (`--features`, `--locked`, ...)
+go in `rust-build-args`, which refuses selectors.
+
+The Python job first collects the selection, reading the node ids from a
+pytest collection hook rather than from `--collect-only` output, so `-q` in
+the caller's `addopts` changes nothing. A missing `pytest-codspeed` or a
+selection with no benchmark fails before CodSpeed runs. Under `--codspeed`
+only benchmark tests (`@pytest.mark.benchmark` or the `benchmark` fixture) are
+selected, so `python-path` may point at the whole test tree.
+
+`mode` is `simulation` (default), `memory`, or `simulation,memory` (both
+instruments, one build). `walltime` is refused: it needs CodSpeed's macro
+runners and a separate build. `rust: false` and `python: false` switch an
+ecosystem off. `build-only: true` skips CodSpeed and uploads nothing: Rust
+builds and then runs `cargo codspeed run` once per mode, uninstrumented;
+Python installs and collects. `self-test-bench.yml` uses it, since CodSpeed
+has not imported this repository.
+
+For public repositories only. Uploads are tokenless, which CodSpeed accepts
+from public repositories ("CodSpeed allows tokenless uploads for public
+repositories, allowing runs to be triggered from public forks directly",
+[CodSpeed docs](https://codspeed.io/docs/integrations/ci/github-actions/configuration#tokenless)).
+`bench.yml` needs no secrets and requests no OIDC permission: its jobs hold
+`contents: read` and nothing else, so the caller grants no `id-token: write`.
+CodSpeed recommends OIDC, but with it the benchmark code, its build scripts and
+pytest collection could mint OIDC tokens for any audience, and a pull request
+from a fork runs that code. Pull requests from forks of a public repository
+are benchmarked and reported like any other.
+
+One-time setup (org admin): import the repository at
+[codspeed.io](https://codspeed.io), which installs the CodSpeed GitHub App on
+it. Do this before adding the workflow; without it CodSpeed has no project to
+report against.
+
+Trigger on `pull_request` and on `push` to the default branch: the push runs
+record the baseline pull requests are compared against. A
+`workflow_dispatch` trigger may be added to let CodSpeed backtest earlier
+commits. The caller for InstruktAI/logging:
+
+```yaml
+name: bench
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    uses: InstruktAI/workflows/.github/workflows/bench.yml@v1
+    with:
+      rust-selectors: -p instrukt-ai-logging --bench writer
+      python-path: benchmarks
+```
 
 ## Releasing this repository
 

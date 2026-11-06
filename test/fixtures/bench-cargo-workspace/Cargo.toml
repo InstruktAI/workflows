@@ -1,0 +1,7 @@
+# The benchmark package is not a default member: `cargo codspeed run` with no
+# -p looks only at crates/app, finds no benchmark and fails. The self-test
+# passes only when bench.yml carries rust-selectors into the run command.
+[workspace]
+resolver = "2"
+members = ["crates/app", "crates/bench-member"]
+default-members = ["crates/app"]
