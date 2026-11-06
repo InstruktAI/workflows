@@ -24,10 +24,11 @@ toolchain, pipelines just push buttons.
 | `deploy-cloudflare.yml`| Build and deploy `dist/` to a Cloudflare Pages project |
 | `deps-audit.yml`       | Dependency safety gates, auto-detected per ecosystem (see below) |
 | `dep-pr-review.yml`    | Provenance and AI code review of each dependency a Renovate PR updates (see below) |
+| `bench.yml`            | CodSpeed benchmarks (Rust, Python) with regression reports on PRs (see below) |
 
 This repo's own workflows, not for callers: `release.yml` (releases this
 repo, see "Releasing"), `actionlint.yml`, `self-test.yml`,
-`self-test-dep-pr-review.yml`.
+`self-test-dep-pr-review.yml`, `self-test-bench.yml`.
 
 Shared config, not workflows:
 
@@ -261,6 +262,69 @@ resolutions, `docker://` actions. Changes to `go.sum`, `yarn.lock`,
 pins (`.nvmrc`, `rust-toolchain`, ...) block too. Repository-local entries
 (path, editable, workspace members, `./` actions) are part of the PR itself
 and are not treated as dependencies.
+
+## Benchmarks: `bench.yml`
+
+Runs a repository's [CodSpeed](https://codspeed.io) benchmarks in CPU
+simulation mode and uploads the results. CodSpeed compares every pull request
+with the latest run on the default branch and reports regressions on the PR.
+Simulation counts instructions under emulation instead of timing them, so
+results on shared hosted runners stay stable enough to compare. Ecosystems are
+detected in `working-directory`, as in `deps-audit.yml`; each gets its own job:
+
+| Ecosystem | Runs when | Does |
+| --------- | --------- | ---- |
+| Rust | `Cargo.toml` | installs `cargo-codspeed` (`cargo install --locked`, exact `cargo-codspeed-version`), `cargo codspeed build <rust-build-args>`, then `cargo codspeed run` under CodSpeed. Benchmarks use `codspeed-divan-compat` (or the criterion/bencher compat crates). |
+| Python | `pyproject.toml` and `uv.lock` (no `uv.lock` fails) | Python from `actions/setup-python`, which CodSpeed requires for tracing (`python-version`, else `.python-version`, else `requires-python`), `uv sync --locked <uv-sync-args>` on that interpreter, then `pytest <python-path> --codspeed [-m <python-marker>] <python-args>` under CodSpeed. `pytest-codspeed` must be in the synced groups (default `--group dev`). |
+
+The Python job first collects the selection with `--collect-only`, so a
+missing `pytest-codspeed` or a selection with no benchmark fails before
+CodSpeed runs. Under `--codspeed` only benchmark tests (`@pytest.mark.benchmark`
+or the `benchmark` fixture) are selected, so `python-path` may point at the
+whole test tree.
+
+`mode` is `simulation` (default), `memory`, or `simulation,memory` (both
+instruments, one build). `walltime` is refused: it needs CodSpeed's macro
+runners and a separate build. `rust: false` and `python: false` switch an
+ecosystem off. `build-only: true` stops after the build (Rust) or collection
+(Python) and uploads nothing; `self-test-bench.yml` uses it, since CodSpeed
+has not imported this repository.
+
+Auth is OIDC: the benchmark jobs need `id-token: write` and take no token
+secret. A pull request from a fork gets no OIDC token; the CodSpeed runner
+then uploads tokenless, which public repositories allow.
+
+One-time setup (org admin): import the repository at
+[codspeed.io](https://codspeed.io), which installs the CodSpeed GitHub App on
+it. Do this before adding the workflow; without it CodSpeed has no project to
+report against.
+
+Keep all three triggers: `push` to the default branch records the baseline
+pull requests are compared against, and `workflow_dispatch` lets CodSpeed
+backtest earlier commits.
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    permissions:
+      contents: read
+      id-token: write
+    uses: InstruktAI/workflows/.github/workflows/bench.yml@v1
+    # with:
+    #   rust-build-args: -p my-crate --bench writer
+    #   python-path: benchmarks
+    #   python-marker: not slow
+    #   mode: simulation,memory
+```
 
 ## Releasing this repository
 
