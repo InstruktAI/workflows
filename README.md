@@ -274,8 +274,14 @@ detected in `working-directory`, as in `deps-audit.yml`; each gets its own job:
 
 | Ecosystem | Runs when | Does |
 | --------- | --------- | ---- |
-| Rust | `Cargo.toml` | installs `cargo-codspeed` (`cargo install --locked`, exact `cargo-codspeed-version`), `cargo codspeed build <rust-build-args>`, then `cargo codspeed run` under CodSpeed. Benchmarks use `codspeed-divan-compat` (or the criterion/bencher compat crates). |
+| Rust | `Cargo.toml` | installs `cargo-codspeed` (`cargo install --locked`, exact `cargo-codspeed-version`), `cargo codspeed build <rust-selectors> <rust-build-args>`, then `cargo codspeed run <rust-selectors>` under CodSpeed. Benchmarks use `codspeed-divan-compat` (or the criterion/bencher compat crates). |
 | Python | `pyproject.toml` and `uv.lock` (no `uv.lock` fails) | Python from `actions/setup-python`, which CodSpeed requires for tracing (`python-version`, else `.python-version`, else `requires-python`), `uv sync --locked <uv-sync-args>` on that interpreter, then `pytest <python-path> --codspeed [-m <python-marker>] <python-args>` under CodSpeed. `pytest-codspeed` must be in the synced groups (default `--group dev`). |
+
+`rust-selectors` takes only `-p`/`--package`, `--bench`, `--workspace` and
+`--exclude`, and goes to both commands: `cargo codspeed run` selects by its
+own flags, and without them runs the workspace default members' benchmarks,
+whatever the build selected. Build-only flags (`--features`, `--locked`, ...)
+go in `rust-build-args`, which refuses selectors.
 
 The Python job first collects the selection, reading the node ids from a
 pytest collection hook rather than from `--collect-only` output, so `-q` in
@@ -287,8 +293,9 @@ selected, so `python-path` may point at the whole test tree.
 `mode` is `simulation` (default), `memory`, or `simulation,memory` (both
 instruments, one build). `walltime` is refused: it needs CodSpeed's macro
 runners and a separate build. `rust: false` and `python: false` switch an
-ecosystem off. `build-only: true` stops after the build (Rust) or collection
-(Python) and uploads nothing; `self-test-bench.yml` uses it, since CodSpeed
+ecosystem off. `build-only: true` skips CodSpeed and uploads nothing: Rust
+builds and then runs `cargo codspeed run` once per mode, uninstrumented;
+Python installs and collects. `self-test-bench.yml` uses it, since CodSpeed
 has not imported this repository.
 
 Auth is OIDC: the benchmark jobs need `id-token: write` and take no token
@@ -321,7 +328,7 @@ jobs:
       id-token: write
     uses: InstruktAI/workflows/.github/workflows/bench.yml@v1
     # with:
-    #   rust-build-args: -p my-crate --bench writer
+    #   rust-selectors: -p my-crate --bench writer
     #   python-path: benchmarks
     #   python-marker: not slow
     #   mode: simulation,memory

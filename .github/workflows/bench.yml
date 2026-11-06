@@ -28,15 +28,19 @@ on:
         type: string
         default: simulation
       build-only:
-        description: Build (Rust) or install and collect (Python) without running or uploading; for checks in a repository CodSpeed has not imported
+        description: "Skip CodSpeed and upload nothing: Rust builds, then runs `cargo codspeed run` once per mode uninstrumented; Python installs and collects. For checks in a repository CodSpeed has not imported."
         type: boolean
         default: false
       rust:
         description: Run the Rust benchmarks when Cargo.toml exists
         type: boolean
         default: true
+      rust-selectors:
+        description: "Package and bench target selection passed to both `cargo codspeed build` and `cargo codspeed run`: `-p`/`--package`, `--bench`, `--workspace`, `--exclude`, e.g. `-p my-crate --bench writer`; empty selects the workspace default members' bench targets"
+        type: string
+        default: ''
       rust-build-args:
-        description: "Arguments to `cargo codspeed build` selecting packages and bench targets, e.g. `-p my-crate --bench writer`; empty builds every bench target"
+        description: "Extra flags for `cargo codspeed build` only, e.g. `--features simd --locked`; selectors belong in rust-selectors and are refused here"
         type: string
         default: ''
       cargo-codspeed-version:
@@ -180,14 +184,43 @@ jobs:
           VERSION: ${{ inputs.cargo-codspeed-version }}
         run: cargo +stable install cargo-codspeed --locked --version "$VERSION"
 
+      # `cargo codspeed run` picks the benchmarks by its own -p/--bench, and
+      # without them by the workspace default members, whatever the build
+      # selected. So the selectors go to both commands, and build-only flags
+      # (which `run` refuses) to the build alone.
       - name: Build the benchmarks
         working-directory: ${{ inputs.working-directory }}
         env:
           MODE: ${{ needs.detect.outputs.mode }}
+          RUST_SELECTORS: ${{ inputs.rust-selectors }}
           BUILD_ARGS: ${{ inputs.rust-build-args }}
         run: |
+          read -ra selectors <<< "$RUST_SELECTORS"
           read -ra args <<< "$BUILD_ARGS"
-          cargo codspeed build --measurement-mode "$MODE" "${args[@]}"
+          n=${#selectors[@]}
+          for ((i = 0; i < n; i++)); do
+            case "${selectors[i]}" in
+              --workspace|--package=?*|--bench=?*|--exclude=?*) ;;
+              -p|--package|--bench|--exclude)
+                next=${selectors[i + 1]:-}
+                if [ -z "$next" ] || [ "${next#-}" != "$next" ]; then
+                  echo "::error::rust-selectors: ${selectors[i]} needs a value"
+                  exit 1
+                fi
+                i=$((i + 1)) ;;
+              *)
+                echo "::error::rust-selectors: '${selectors[i]}' is not a selector; it takes -p/--package, --bench, --workspace and --exclude, build flags go in rust-build-args"
+                exit 1 ;;
+            esac
+          done
+          for a in "${args[@]}"; do
+            case "$a" in
+              -p*|--package|--package=*|--bench|--bench=*|--workspace|--exclude|--exclude=*)
+                echo "::error::rust-build-args: '$a' selects benchmarks; put it in rust-selectors, so cargo codspeed run selects the same ones"
+                exit 1 ;;
+            esac
+          done
+          cargo codspeed build --measurement-mode "$MODE" "${selectors[@]}" "${args[@]}"
 
       # The CodSpeed runner executes `run` with bash in this step's
       # environment, once per mode, with CODSPEED_RUNNER_MODE set.
@@ -196,13 +229,29 @@ jobs:
         uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
         env:
           BENCH_WORKDIR: ${{ inputs.working-directory }}
+          RUST_SELECTORS: ${{ inputs.rust-selectors }}
         with:
           mode: ${{ needs.detect.outputs.mode }}
-          # Runs what the build step produced.
           run: |
             set -euo pipefail
             cd -- "$BENCH_WORKDIR"
-            cargo codspeed run
+            read -ra selectors <<< "$RUST_SELECTORS"
+            cargo codspeed run "${selectors[@]}"
+
+      # Without CodSpeed the benchmarks run once, uninstrumented, through the
+      # same `cargo codspeed run` selection; nothing is measured or uploaded.
+      - name: Run the benchmarks without CodSpeed (build-only)
+        if: ${{ inputs.build-only }}
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          MODE: ${{ needs.detect.outputs.mode }}
+          RUST_SELECTORS: ${{ inputs.rust-selectors }}
+        run: |
+          read -ra selectors <<< "$RUST_SELECTORS"
+          IFS=, read -ra modes <<< "$MODE"
+          for m in "${modes[@]}"; do
+            cargo codspeed run --measurement-mode "$m" "${selectors[@]}"
+          done
 
   python:
     name: python benchmarks
