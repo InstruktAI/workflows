@@ -12,3 +12,8 @@ paths:
       # Same job-context properties: the tool is checked out from the
       # commit this reusable workflow was loaded from.
       - 'property "workflow_(repository|sha)" is not defined'
+  .github/workflows/company-skill.yml:
+    ignore:
+      # Same job-context properties: the renderer is fetched from the commit
+      # this reusable workflow was loaded from.
+      - 'property "workflow_(repository|sha)" is not defined'

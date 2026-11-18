@@ -1,0 +1,27 @@
+name: self-test-company-skill
+
+# Tests the company-skill renderer against the example company home under
+# test/fixtures/company-skill: its committed rendering is current, the same
+# documents give the same bytes, a changed document raises the plugin version
+# once, and a reference outside the company's own documents is refused.
+# company-skill.yml itself needs a repository named company-<slug> to publish
+# to, so it is exercised by a company repository's own run.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Renderer tests
+        run: python3 -I -m unittest discover -s test/company-skill -v
