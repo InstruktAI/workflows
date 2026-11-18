@@ -120,6 +120,12 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("visibility 'secret'", result.stderr)
 
+    def test_whole_line_comments_are_dropped_also_over_several_lines(self) -> None:
+        master = self.home / "AGENTS.master.md"
+        master.write_text("<!-- one\nline two -->\n" + master.read_text())
+        self.assertEqual(self.render("--check").returncode, 0)
+        self.assertNotIn("<!--", (self.home / "plugins/example/skills/example/SKILL.md").read_text())
+
     def test_a_document_not_required_by_the_master_becomes_a_reference(self) -> None:
         skill = (self.home / "plugins/example/skills/example/SKILL.md").read_text()
         self.assertIn("`references/products.md`", skill)

@@ -49,7 +49,6 @@ SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 LINK = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)\s]+)\)")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HEADING = re.compile(r"^(#{1,6}) ")
-COMMENT_LINE = re.compile(r"^\s*<!--.*-->\s*$")
 # What reaches outside the company's own documents: an at-include, a home or
 # absolute path, an instrukt docs read, or a snippet id of the shared doctrine.
 OUTSIDE = (
@@ -152,7 +151,18 @@ def demote(body: str, levels: int) -> str:
 
 
 def without_comments(text: str) -> str:
-    lines = [line for line in text.splitlines() if not COMMENT_LINE.match(line)]
+    """Drop HTML comments that occupy whole lines, such as a master's lock notes, also over several lines."""
+    lines: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if inside:
+            inside = "-->" not in stripped
+            continue
+        if stripped.startswith("<!--"):
+            inside = "-->" not in stripped[4:]
+            continue
+        lines.append(line)
     return "\n".join(lines).strip() + "\n"
 
 
