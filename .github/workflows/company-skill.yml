@@ -1,0 +1,53 @@
+name: company-skill
+
+# Publishes a company's knowledge. The company's repository is its home:
+# `AGENTS.master.md` at the root and the documents under `docs/`. This
+# renders them into the committed `AGENTS.md`, the company's Claude plugin
+# under `plugins/<slug>/` (its version raised whenever the rendering changes)
+# and the plugin's entry in `.claude-plugin/marketplace.json`, and commits and
+# pushes the result only when it changed. The caller's job grants
+# `contents: write`; a pull request's check uses company-skill-check.yml,
+# which needs read access only.
+#
+# The scripts come from the commit this workflow was loaded from, so they
+# always match the version the caller pinned. scripts/company-skill/render.py
+# stands in for the instrukt command that will render company skills; that
+# command can replace it here without any change in a company's repository.
+#
+# The push is made with the caller's GITHUB_TOKEN, and GitHub starts no
+# workflow from a push made with that token, so publishing does not loop.
+
+on:
+  workflow_call:
+    inputs:
+      company-name:
+        description: The company's name as people write it, such as Example
+        type: string
+        required: true
+      company-slug:
+        description: The <slug> of the repository name company-<slug>; taken from the calling repository's name when empty
+        type: string
+        default: ''
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: company
+      # An empty job.workflow_* would check out the caller instead, which has
+      # no scripts/company-skill/, so the next step fails closed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: pipeline
+          persist-credentials: false
+      - name: Render and publish when changed
+        env:
+          NAME: ${{ inputs.company-name }}
+          SLUG: ${{ inputs.company-slug }}
+        run: python3 -I pipeline/scripts/company-skill/publish.py --root company --name "$NAME" --slug "$SLUG" --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_REF"

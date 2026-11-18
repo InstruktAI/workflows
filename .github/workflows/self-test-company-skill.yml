@@ -1,0 +1,33 @@
+name: self-test-company-skill
+
+# Checks the company-skill scripts and tests the renderer. It runs against the
+# example company home under test/fixtures/company-skill: its committed
+# rendering is current, the same documents give the same bytes, a changed
+# document raises the plugin version once, and a reference outside the
+# company's own documents is refused. Both scripts are type-checked and
+# linted with exact tool versions. The workflows themselves need a
+# repository named company-<slug>, so a company repository's own runs
+# exercise them and publish.py.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Type check
+        run: pipx run --spec mypy==1.18.2 mypy --strict --python-version 3.12 scripts/company-skill/render.py scripts/company-skill/publish.py
+      - name: Lint
+        run: pipx run --spec ruff==0.14.0 ruff check scripts/company-skill test/company-skill
+      - name: Tests
+        run: python3 -I -m unittest discover -s test/company-skill -v

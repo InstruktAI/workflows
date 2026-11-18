@@ -1,0 +1,22 @@
+{
+  "name": "example",
+  "owner": {
+    "name": "Example"
+  },
+  "plugins": [
+    {
+      "name": "other",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/example/other",
+        "path": "plugins/other",
+        "ref": "v1.0.0"
+      }
+    },
+    {
+      "name": "example",
+      "source": "./plugins/example",
+      "description": "Example's own company knowledge: its people, its systems and how it works."
+    }
+  ]
+}
