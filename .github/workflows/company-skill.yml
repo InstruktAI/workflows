@@ -1,18 +1,18 @@
 name: company-skill
 
-# Renders a company's knowledge from the documents in its repository, the
-# repository that is the company's home: `AGENTS.master.md` at the root and
-# the documents under `docs/`. It writes the committed `AGENTS.md`, the
-# company's Claude plugin under `plugins/<slug>/` (its version raised whenever
-# the rendering changes) and the plugin's entry in
-# `.claude-plugin/marketplace.json`. With `publish`, it commits and pushes the
-# result only when it changed; without, it renders without writing and fails
-# only on a finding in the documents (a pull request's check).
+# Publishes a company's knowledge. The company's repository is its home:
+# `AGENTS.master.md` at the root and the documents under `docs/`. This
+# renders them into the committed `AGENTS.md`, the company's Claude plugin
+# under `plugins/<slug>/` (its version raised whenever the rendering changes)
+# and the plugin's entry in `.claude-plugin/marketplace.json`, and commits and
+# pushes the result only when it changed. The caller's job grants
+# `contents: write`; a pull request's check uses company-skill-check.yml,
+# which needs read access only.
 #
-# The rendering is scripts/company-skill/render.py, fetched from the commit
-# this workflow was loaded from. It stands in for the instrukt command that
-# will render company skills; that command can replace it here without any
-# change in a company's repository.
+# The scripts come from the commit this workflow was loaded from, so they
+# always match the version the caller pinned. scripts/company-skill/render.py
+# stands in for the instrukt command that will render company skills; that
+# command can replace it here without any change in a company's repository.
 #
 # The push is made with the caller's GITHUB_TOKEN, and GitHub starts no
 # workflow from a push made with that token, so publishing does not loop.
@@ -21,102 +21,33 @@ on:
   workflow_call:
     inputs:
       company-name:
-        description: The company's name as people write it, such as Sunfield
+        description: The company's name as people write it, such as Example
         type: string
         required: true
       company-slug:
         description: The <slug> of the repository name company-<slug>; taken from the calling repository's name when empty
         type: string
         default: ''
-      publish:
-        description: Commit and push the rendering when it changed (true), or only render without writing and fail on a finding in the documents (false)
-        type: boolean
-        default: true
-
-permissions:
-  contents: read
 
 jobs:
-  render:
+  publish:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: ${{ inputs.publish }}
-
-      - name: Fetch the renderer
-        env:
-          # The repo and commit this reusable workflow was loaded from, so the
-          # renderer always matches the workflow version the caller pinned.
-          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
-            echo "::error::job.workflow_repository/job.workflow_sha unavailable; cannot fetch the renderer"
-            exit 1
-          fi
-          curl --fail --silent --show-error --location --retry 3 \
-            --output "$RUNNER_TEMP/render.py" \
-            "https://raw.githubusercontent.com/$WORKFLOW_REPOSITORY/$WORKFLOW_SHA/scripts/company-skill/render.py"
-          echo "Renderer from $WORKFLOW_REPOSITORY@$WORKFLOW_SHA"
-
-      - id: company
-        name: Resolve the company
-        env:
-          SLUG: ${{ inputs.company-slug }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [ -z "$SLUG" ]; then
-            name="${REPOSITORY#*/}"
-            case "$name" in
-              company-*) SLUG="${name#company-}" ;;
-              *) echo "::error::$REPOSITORY is not named company-<slug>; pass company-slug"; exit 1 ;;
-            esac
-          fi
-          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
-
-      - name: Validate the documents
-        if: ${{ !inputs.publish }}
-        env:
-          NAME: ${{ inputs.company-name }}
-          SLUG: ${{ steps.company.outputs.slug }}
-        run: python3 -I "$RUNNER_TEMP/render.py" --root . --name "$NAME" --slug "$SLUG" --validate
-
+          path: company
+      # An empty job.workflow_* would check out the caller instead, which has
+      # no scripts/company-skill/, so the next step fails closed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: pipeline
+          persist-credentials: false
       - name: Render and publish when changed
-        if: ${{ inputs.publish }}
         env:
           NAME: ${{ inputs.company-name }}
-          SLUG: ${{ steps.company.outputs.slug }}
-        run: |
-          set -euo pipefail
-          case "$GITHUB_REF" in
-            refs/heads/*) branch="${GITHUB_REF#refs/heads/}" ;;
-            *) echo "::error::publishing needs a branch; $GITHUB_REF is not one"; exit 1 ;;
-          esac
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Another push to the branch can land between checkout and push; then
-          # the rendering is redone on top of it, at most three times.
-          for attempt in 1 2 3; do
-            python3 -I "$RUNNER_TEMP/render.py" --root . --name "$NAME" --slug "$SLUG"
-            git add --all -- AGENTS.md "plugins/$SLUG" .claude-plugin/marketplace.json
-            if git diff --cached --quiet; then
-              echo "The rendering of $SLUG is unchanged; nothing to publish."
-              exit 0
-            fi
-            version=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "plugins/$SLUG/.claude-plugin/plugin.json")
-            git commit --quiet --message "chore: render $SLUG knowledge, plugin $version"
-            if git push origin "HEAD:refs/heads/$branch"; then
-              echo "Published $SLUG plugin $version"
-              exit 0
-            fi
-            echo "Push $attempt refused; rendering again on top of the branch"
-            git fetch --quiet origin "$branch"
-            git reset --quiet --hard FETCH_HEAD
-          done
-          echo "::error::could not publish the rendering after three attempts"
-          exit 1
+          SLUG: ${{ inputs.company-slug }}
+        run: python3 -I pipeline/scripts/company-skill/publish.py --root company --name "$NAME" --slug "$SLUG" --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_REF"

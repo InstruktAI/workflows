@@ -1,0 +1,46 @@
+name: company-skill-check
+
+# Validates a company's knowledge documents without writing anything: renders
+# them in memory with the same renderer company-skill.yml publishes with and
+# fails on any finding. Meant for a pull request; it needs read access only.
+# The committed rendering on a branch may lag; company-skill.yml brings it
+# current once the change reaches the default branch.
+
+on:
+  workflow_call:
+    inputs:
+      company-name:
+        description: The company's name as people write it, such as Example
+        type: string
+        required: true
+      company-slug:
+        description: The <slug> of the repository name company-<slug>; taken from the calling repository's name when empty
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: company
+          persist-credentials: false
+      # An empty job.workflow_* would check out the caller instead, which has
+      # no scripts/company-skill/, so the next step fails closed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: pipeline
+          persist-credentials: false
+      - name: Validate the documents
+        env:
+          NAME: ${{ inputs.company-name }}
+          SLUG: ${{ inputs.company-slug }}
+        run: python3 -I pipeline/scripts/company-skill/render.py --root company --name "$NAME" --slug "$SLUG" --repository "$GITHUB_REPOSITORY" --validate

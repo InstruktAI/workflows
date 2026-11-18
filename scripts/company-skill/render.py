@@ -21,7 +21,7 @@ This is the stand-in for the instrukt command that will render company skills;
 it reads and writes the same files, so that command can replace it without any
 change in a company's repository.
 
-Usage: render.py --root DIR --name NAME --slug SLUG [--check | --validate]
+Usage: render.py --root DIR --name NAME (--slug SLUG | --repository OWNER/company-SLUG) [--check | --validate]
   --check     write nothing; exit 1 and name each file whose committed content
               differs from the rendering.
   --validate  write nothing; exit 1 only on a finding in the documents.
@@ -33,14 +33,16 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from typing import TypeAlias
 
 MASTER = "AGENTS.master.md"
 ENTRYPOINT = "AGENTS.md"
 DOCS = "docs"
 CATALOG = ".claude-plugin/marketplace.json"
-VISIBILITIES = ("internal", "public")
 FRONTMATTER_KEYS = {"description", "visibility"}
 FIRST_VERSION = "0.1.0"
 MAX_DESCRIPTION_CHARS = 1024
@@ -49,8 +51,10 @@ SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 LINK = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)\s]+)\)")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HEADING = re.compile(r"^(#{1,6}) ")
-# What reaches outside the company's own documents: an at-include, a home or
-# absolute path, an instrukt docs read, or a snippet id of the shared doctrine.
+# Text that reaches outside the company's own documents: an @-include, a path
+# that starts in a home folder (`~/`), an `instrukt docs` or `telec docs` read,
+# or a snippet id of the shared `general/` or `sdlc/` doctrine. Markdown links
+# are checked separately (see check_self_contained).
 OUTSIDE = (
     (re.compile(r"(^|\s)@[~/.]"), "an @-include"),
     (re.compile(r"(^|[\s(`])~/"), "a path in a home folder"),
@@ -60,15 +64,60 @@ OUTSIDE = (
 )
 
 
+JsonValue: TypeAlias = "str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]"
+JsonObject: TypeAlias = "dict[str, JsonValue]"
+
+
 class RenderError(Exception):
     pass
+
+
+class Visibility(StrEnum):
+    """Who a document is for. The internal skill holds every document; a public one only `public` documents."""
+
+    INTERNAL = "internal"
+    PUBLIC = "public"
+
+
+@dataclass(frozen=True)
+class Catalog:
+    """The plugin catalog: the plugin entries this renderer reads, and the rest of the file kept as it is."""
+
+    document: JsonObject
+    plugins: list[JsonValue]
+
+    @classmethod
+    def parse(cls, text: str) -> "Catalog":
+        document = json.loads(text)
+        if not isinstance(document, dict):
+            raise RenderError(f"{CATALOG}: expected an object")
+        plugins = document.get("plugins")
+        if not isinstance(plugins, list):
+            raise RenderError(f"{CATALOG}: 'plugins' must be a list")
+        return cls(document, plugins)
+
+    def entry(self, name: str) -> JsonObject | None:
+        """The entry listed under this name; entries of other shapes are kept and never read."""
+        for plugin in self.plugins:
+            if isinstance(plugin, dict) and plugin.get("name") == name:
+                return plugin
+        return None
+
+
+def manifest_version(text: str) -> str:
+    """The `version` a committed plugin.json carries."""
+    manifest = json.loads(text)
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    if not isinstance(version, str):
+        raise RenderError("the committed plugin.json has no 'version' string")
+    return version
 
 
 @dataclass(frozen=True)
 class Document:
     path: PurePosixPath  # relative to the repository root, under docs/
     description: str
-    visibility: str
+    visibility: Visibility
     body: str
 
     @property
@@ -95,7 +144,7 @@ def split_frontmatter(text: str, where: str) -> tuple[dict[str, str], str]:
     return meta, text[match.end() :]
 
 
-def outside_code(lines: list[str]):
+def outside_code(lines: list[str]) -> Iterator[tuple[int, str]]:
     """Yield (index, line) for every line outside fenced code."""
     fenced = False
     for index, line in enumerate(lines):
@@ -178,9 +227,14 @@ def read_documents(root: Path) -> dict[PurePosixPath, Document]:
         description = meta.get("description", "")
         if not description:
             findings.append(f"{relative}: frontmatter needs a non-empty 'description'")
-        visibility = meta.get("visibility", "internal")
-        if visibility not in VISIBILITIES:
-            findings.append(f"{relative}: visibility '{visibility}' is not one of {list(VISIBILITIES)}")
+        visibility = Visibility.INTERNAL
+        if "visibility" in meta:
+            try:
+                visibility = Visibility(meta["visibility"])
+            except ValueError:
+                findings.append(
+                    f"{relative}: visibility '{meta['visibility']}' is not one of {[member.value for member in Visibility]}"
+                )
         documents[relative] = Document(relative, description, visibility, without_comments(body))
     if findings:
         raise RenderError("\n".join(findings))
@@ -259,7 +313,7 @@ def render(root: Path, name: str, slug: str) -> Rendering:
         findings += check_self_contained(document.body, str(document.path), root, document.path.parent)
         for _, target in LINK.findall(document.body):
             linked = documents.get(resolve(document.path.parent, target) or PurePosixPath())
-            if document.visibility == "public" and linked and linked.visibility == "internal":
+            if document.visibility is Visibility.PUBLIC and linked and linked.visibility is Visibility.INTERNAL:
                 findings.append(f"{document.path}: a public document may not depend on the internal {linked.path}")
     for path in required:
         if path not in documents:
@@ -273,7 +327,7 @@ def render(root: Path, name: str, slug: str) -> Rendering:
     referenced = [document for path, document in documents.items() if path not in set(required)]
     fixed = passage(name, slug)
 
-    def link_rewriter(document: Document, in_skill: bool):
+    def link_rewriter(document: Document, in_skill: bool) -> Callable[[re.Match[str]], str]:
         def rewrite(match: re.Match[str]) -> str:
             text, target = match.group(1), match.group(2)
             resolved = resolve(document.path.parent, target)
@@ -353,19 +407,15 @@ def catalog_with_entry(root: Path, slug: str, name: str) -> str:
     path = root / CATALOG
     if not path.is_file():
         raise RenderError(f"{CATALOG} is missing: the company's repository is its plugin catalog")
-    catalog = json.loads(path.read_text(encoding="utf-8"))
-    plugins = catalog.get("plugins")
-    if not isinstance(plugins, list):
-        raise RenderError(f"{CATALOG}: 'plugins' must be a list")
-    wanted = {"name": slug, "source": f"./plugins/{slug}", "description": plugin_description(name)}
-    for plugin in plugins:
-        if isinstance(plugin, dict) and plugin.get("name") == slug:
-            plugin.update(wanted)  # keeps any other field an operator set on the entry
-            break
+    catalog = Catalog.parse(path.read_text(encoding="utf-8"))
+    wanted: JsonObject = {"name": slug, "source": f"./plugins/{slug}", "description": plugin_description(name)}
+    entry = catalog.entry(slug)
+    if entry is None:
+        catalog.plugins.append(wanted)
     else:
-        plugins.append(wanted)
+        entry.update(wanted)  # keeps any other field an operator set on the entry
     # The same form tools/update_catalog.py writes, so the two never rewrite each other's bytes.
-    return json.dumps(catalog, indent=2) + "\n"
+    return json.dumps(catalog.document, indent=2) + "\n"
 
 
 def plan(root: Path, name: str, slug: str) -> tuple[dict[str, str | None], str]:
@@ -373,9 +423,7 @@ def plan(root: Path, name: str, slug: str) -> tuple[dict[str, str | None], str]:
     rendering = render(root, name, slug)
     plugin_json = f"{rendering.plugin_dir}/.claude-plugin/plugin.json"
     committed = committed_tree(root, rendering.plugin_dir)
-    previous = None
-    if plugin_json in committed:
-        previous = json.loads(committed[plugin_json]).get("version")
+    previous = manifest_version(committed[plugin_json]) if plugin_json in committed else None
     version = previous or FIRST_VERSION
     plugin_files = {path: text for path, text in rendering.files.items() if path.startswith(rendering.plugin_dir + "/")}
     plugin_files[plugin_json] = manifest(slug, name, version)
@@ -390,39 +438,28 @@ def plan(root: Path, name: str, slug: str) -> tuple[dict[str, str | None], str]:
     return wanted, version
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
-    parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--name", required=True, help="the company's name as people write it")
-    parser.add_argument("--slug", required=True, help="the company's name in the repository name company-<slug>")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--check", action="store_true")
-    mode.add_argument("--validate", action="store_true")
-    args = parser.parse_args()
-    root = args.root.resolve()
-    try:
-        wanted, version = plan(root, args.name, args.slug)
-    except (RenderError, json.JSONDecodeError) as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
+def resolve_slug(slug: str, repository: str) -> str:
+    """The slug given, or else the <slug> of a repository named owner/company-<slug>."""
+    if slug:
+        return slug
+    name = repository.rpartition("/")[2]
+    if not name.startswith("company-"):
+        raise RenderError(f"repository '{repository}' is not named company-<slug>; pass --slug")
+    return name.removeprefix("company-")
 
-    if args.validate:
-        print(f"the documents of {args.slug} render without findings (plugin {version} if published now)")
-        return 0
+
+def changed_files(root: Path, wanted: dict[str, str | None]) -> list[str]:
+    """The files whose content on disk differs from the rendering, in path order."""
     changed = []
     for relative, content in sorted(wanted.items()):
         path = root / relative
         current = path.read_text(encoding="utf-8") if path.is_file() else None
         if current != content:
             changed.append(relative)
-    if args.check:
-        if changed:
-            print("the committed rendering differs from the documents:", file=sys.stderr)
-            for relative in changed:
-                print(f"  {relative}", file=sys.stderr)
-            return 1
-        print(f"rendering of {args.slug} is current (plugin {version})")
-        return 0
+    return changed
+
+
+def write(root: Path, wanted: dict[str, str | None], changed: list[str]) -> None:
     for relative in changed:
         path = root / relative
         content = wanted[relative]
@@ -431,7 +468,48 @@ def main() -> int:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-    print(f"rendered {args.slug}: plugin {version}, {len(changed)} file(s) changed")
+
+
+def render_into(root: Path, name: str, slug: str) -> tuple[list[str], str]:
+    """Write the rendering into the checkout at root; the files changed and the plugin version."""
+    wanted, version = plan(root, name, slug)
+    changed = changed_files(root, wanted)
+    write(root, wanted, changed)
+    return changed, version
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--name", required=True, help="the company's name as people write it")
+    parser.add_argument("--slug", default="", help="the <slug> of the repository name company-<slug>")
+    parser.add_argument("--repository", default="", help="owner/company-<slug>, read when --slug is empty")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--validate", action="store_true")
+    args = parser.parse_args()
+    root = args.root.resolve()
+    try:
+        slug = resolve_slug(args.slug, args.repository)
+        wanted, version = plan(root, args.name, slug)
+    except (RenderError, json.JSONDecodeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.validate:
+        print(f"the documents of {slug} render without findings (plugin {version} if published now)")
+        return 0
+    changed = changed_files(root, wanted)
+    if args.check:
+        if changed:
+            print("the committed rendering differs from the documents:", file=sys.stderr)
+            for relative in changed:
+                print(f"  {relative}", file=sys.stderr)
+            return 1
+        print(f"rendering of {slug} is current (plugin {version})")
+        return 0
+    write(root, wanted, changed)
+    print(f"rendered {slug}: plugin {version}, {len(changed)} file(s) changed")
     for relative in changed:
         print(f"  {relative}")
     return 0

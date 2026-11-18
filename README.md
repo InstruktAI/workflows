@@ -26,6 +26,7 @@ toolchain, pipelines just push buttons.
 | `dep-pr-review.yml`    | Provenance and AI code review of each dependency a Renovate PR updates (see below) |
 | `bench.yml`            | CodSpeed benchmarks (Rust, Python) with regression reports on PRs (see below) |
 | `company-skill.yml`    | Render a company's knowledge into its committed `AGENTS.md` and its Claude plugin, publish when changed (see below) |
+| `company-skill-check.yml` | Validate a company's knowledge documents on a pull request, read access only (see below) |
 
 This repo's own workflows, not for callers: `release.yml` (releases this
 repo, see "Releasing"), `actionlint.yml`, `self-test.yml`,
@@ -340,12 +341,12 @@ jobs:
       python-path: benchmarks
 ```
 
-## Company knowledge: `company-skill.yml`
+## Company knowledge: `company-skill.yml` and `company-skill-check.yml`
 
 A company InstruktAI serves has one private repository, `company-<slug>`,
 which is the company's home: `AGENTS.master.md` at the root is the company's
-knowledge master, and the documents it draws on sit under `docs/`. This
-workflow renders them, and nothing else, into:
+knowledge master, and the documents it draws on sit under `docs/`.
+`company-skill.yml` renders them, and nothing else, into:
 
 - `AGENTS.md` at the root, committed: the master with its required reads
   inlined. `CLAUDE.md` holds only `@./AGENTS.md`, so an agent that checks the
@@ -354,8 +355,10 @@ workflow renders them, and nothing else, into:
   knowledge. Required reads are inlined in `SKILL.md`; every other document is
   a file under `references/` the skill lists;
 - the plugin's entry in `.claude-plugin/marketplace.json`, by relative path
-  (`./plugins/<slug>`): a Claude organization takes a private plugin only from
-  a folder inside the catalog repository.
+  (`./plugins/<slug>`). Claude's organization sync also accepts private plugin
+  sources in other repositories of the same owner; keeping a company's own
+  plugin as a folder inside its catalog repository is this project's rule, so
+  the company's knowledge and its plugin live in one repository.
 
 Both renderings carry a fixed passage that tells the agent where the knowledge
 comes from: the documents of this repository, which is the company's home
@@ -367,24 +370,31 @@ itself. The passage names a location, never a host or an organization.
 The rendering is deterministic: the same documents give the same bytes. The
 plugin's `version` in `plugin.json` is raised (patch) whenever its rendering
 changes and kept otherwise, because a Claude client takes a new copy only when
-the version changes. With `publish: true` the workflow commits and pushes only
-when something changed, with the caller's `GITHUB_TOKEN`; GitHub starts no
-workflow from that push, so there is no loop. With `publish: false`, the
-check for a pull request, it renders without writing and fails only on a
-finding in the documents; the committed rendering on a branch may lag and is
-brought current once the change reaches the default branch.
+the version changes. `company-skill.yml` commits and pushes only when
+something changed, with the caller's `GITHUB_TOKEN`; GitHub starts no workflow
+from that push, so there is no loop. A refused push is redone on top of the
+branch, at most three times. Its job needs `contents: write`.
+
+`company-skill-check.yml` is the check for a pull request: it renders the
+documents in memory and fails only on a finding, with read access only. The
+committed rendering on a branch may lag and is brought current once the change
+reaches the default branch.
 
 A document has frontmatter with a `description` and an optional `visibility`,
 `internal` (the default) or `public`. Only the internal skill is rendered
 today; it holds every document. A public document may not link to an internal
-one. A company's knowledge references nothing outside its own documents: an
-`@`-include, a home-folder path, an `instrukt docs` read, an id of the shared
-`general/` or `sdlc/` doctrine, or a link that is not a document under `docs/`
-is a finding that fails the rendering.
+one. A company's knowledge references nothing outside its own documents, and
+the renderer fails on what it can recognise as such a reference: an
+`@`-include, a path starting in a home folder (`~/`), an `instrukt docs` or
+`telec docs` read, an id of the shared `general/` or `sdlc/` doctrine, and a
+relative or absolute link that does not resolve to a document under `docs/`.
+Web addresses and in-page anchors are allowed; text in fenced code is left
+as written and not checked.
 
-The renderer, `scripts/company-skill/render.py`, is the stand-in for the
-instrukt command that will render company skills; that command can replace it
-in this workflow without any change in a company's repository.
+The scripts, `scripts/company-skill/render.py` and `publish.py`, are checked
+out from the commit the workflow was loaded from. The renderer is the stand-in
+for the instrukt command that will render company skills; that command can
+replace it in these workflows without any change in a company's repository.
 
 ```yaml
 name: knowledge
@@ -398,24 +408,31 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: main-writer
-  cancel-in-progress: false
-
 jobs:
-  render:
+  validate:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    uses: InstruktAI/workflows/.github/workflows/company-skill-check.yml@v1
+    with:
+      company-name: Example
+
+  publish:
+    if: github.event_name != 'pull_request'
+    # Every workflow that pushes to the default branch queues in one group.
+    concurrency:
+      group: main-writer
+      cancel-in-progress: false
     permissions:
       contents: write
     uses: InstruktAI/workflows/.github/workflows/company-skill.yml@v1
     with:
-      company-name: Sunfield
-      publish: ${{ github.event_name != 'pull_request' }}
+      company-name: Example
 ```
 
 `company-slug` defaults to the `<slug>` of the calling repository's name
 `company-<slug>`. Put every workflow that pushes to the default branch in one
-concurrency group, so they queue instead of racing; the push is retried on
-top of the branch three times anyway.
+concurrency group, so they queue instead of racing.
 
 ## Releasing this repository
 
