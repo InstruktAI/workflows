@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from render import CATALOG, ENTRYPOINT, RenderError, manifest_version, render_into, resolve_slug  # noqa: E402
+from render import CATALOG, ENTRYPOINT, RenderError, manifest_version, render_into, resolve_slug  # noqa: E402 module-import-not-at-top: render is importable only after the line above puts this script's directory on sys.path, since the script runs with -I from another working directory
 
 ATTEMPTS = 3
 BOT_NAME = "github-actions[bot]"

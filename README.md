@@ -388,8 +388,10 @@ the renderer fails on what it can recognise as such a reference: an
 `@`-include, a path starting in a home folder (`~/`), an `instrukt docs` or
 `telec docs` read, an id of the shared `general/` or `sdlc/` doctrine, and a
 relative or absolute link that does not resolve to a document under `docs/`.
-Web addresses and in-page anchors are allowed; text in fenced code is left
-as written and not checked.
+Web addresses and in-page anchors are allowed. That check for references
+outside the company's documents skips fenced code blocks, and the rendering
+leaves their text as written. The check that a public document does not link
+to an internal one reads the whole document, fenced code blocks included.
 
 The scripts, `scripts/company-skill/render.py` and `publish.py`, are checked
 out from the commit the workflow was loaded from. The renderer is the stand-in

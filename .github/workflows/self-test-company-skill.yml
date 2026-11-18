@@ -1,14 +1,13 @@
 name: self-test-company-skill
 
-# Checks and tests the company-skill scripts. The renderer runs against the
+# Checks the company-skill scripts and tests the renderer. It runs against the
 # example company home under test/fixtures/company-skill: its committed
 # rendering is current, the same documents give the same bytes, a changed
 # document raises the plugin version once, and a reference outside the
-# company's own documents is refused. The publisher runs against a local bare
-# repository: it publishes once, then finds nothing to publish, and renders
-# again on top of a branch that moved. The workflows themselves need a
+# company's own documents is refused. Both scripts are type-checked and
+# linted with exact tool versions. The workflows themselves need a
 # repository named company-<slug>, so a company repository's own runs
-# exercise them. Type checks and lint use exact tool versions.
+# exercise them and publish.py.
 
 on:
   pull_request:
