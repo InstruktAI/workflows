@@ -16,15 +16,20 @@ Example's company home: `AGENTS.master.md` at its root and the documents under `
 beside it. On a computer or in a container that runs instrukt, the company home
 is the checkout of that repository at `~/.instrukt/companies/example/`.
 
-An agent that has this repository checked out improves the knowledge by
-changing those documents there and committing the change. It never edits what
-is generated from them: `AGENTS.md` and everything under `plugins/example/`.
-Once the commit reaches the repository's default branch, a workflow renders
-the knowledge again and publishes it; nothing else needs to be done.
+An agent with repository access improves this knowledge by editing documents
+under `docs/` on a branch — either in a separate worktree from the company
+home (keeping the serving checkout on the default branch) or in a clone of the
+`company-example` repository — and opening a pull request for independent review. It
+never edits what is generated from them: `AGENTS.md` and everything under
+`plugins/example/`. Once the reviewed pull request passes checks and is
+integrated onto the default branch, a workflow renders the knowledge again and
+publishes it; nothing else needs to be done.
 
-A document states what is true of Example and references nothing outside the
-company's own documents. Settings, secrets and other projects in the company
-home are not knowledge and are never committed.
+A document under `docs/` carries a non-empty `description` in frontmatter,
+states present-tense current truth about Example without historical narration,
+and references nothing outside the company's own documents. Settings, secrets
+and other projects in the company home are not knowledge and are never
+committed.
 
 ## Example — People
 
