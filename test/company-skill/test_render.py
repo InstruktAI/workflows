@@ -87,8 +87,18 @@ class RenderTest(unittest.TestCase):
         for relative in ("AGENTS.md", "plugins/example/skills/example/SKILL.md"):
             text = (self.home / relative).read_text()
             self.assertIn("~/.instrukt/companies/example/", text)
-            self.assertIn("never edits what\nis generated", text)
+            self.assertIn("`company-example`", text)
+            self.assertIn("never edits what is generated", text)
             self.assertNotIn("github", text.lower())
+
+    def test_repository_name_follows_repository_flag_when_slug_is_overridden(self) -> None:
+        result = self.render("--repository", "demo/company-north")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for relative in ("AGENTS.md", "plugins/example/skills/example/SKILL.md"):
+            text = (self.home / relative).read_text()
+            self.assertIn("`company-north`", text)
+            self.assertNotIn("`company-example`", text)
+            self.assertNotIn("demo/", text)
 
     def test_a_reference_outside_the_company_is_refused(self) -> None:
         path = self.home / "docs/people.md"

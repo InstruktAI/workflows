@@ -11,7 +11,10 @@ The push goes out with the credentials the checkout holds. In a workflow that
 is the caller's GITHUB_TOKEN, and GitHub starts no workflow from a push made
 with that token, so publishing does not loop.
 
-Usage: publish.py --root DIR --name NAME (--slug SLUG | --repository OWNER/company-SLUG) --ref REF
+Usage: publish.py --root DIR --name NAME [--slug SLUG] [--repository OWNER/REPO] --ref REF
+  At least one of --slug or --repository is required. --slug sets the local
+  company home and plugin path; --repository supplies the repository name shown
+  in the passage and defaults --slug from company-<slug> when --slug is empty.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from render import CATALOG, ENTRYPOINT, RenderError, manifest_version, render_into, resolve_slug  # noqa: E402 module-import-not-at-top: render is importable only after the line above puts this script's directory on sys.path, since the script runs with -I from another working directory
+from render import CATALOG, ENTRYPOINT, RenderError, manifest_version, render_into, resolve_repository_name, resolve_slug  # noqa: E402 module-import-not-at-top: render is importable only after the line above puts this script's directory on sys.path, since the script runs with -I from another working directory
 
 ATTEMPTS = 3
 BOT_NAME = "github-actions[bot]"
@@ -51,14 +54,14 @@ def branch_of(ref: str) -> str:
     return ref.removeprefix("refs/heads/")
 
 
-def publish(root: Path, name: str, slug: str, ref: str) -> str:
+def publish(root: Path, name: str, slug: str, ref: str, repository_name: str = "") -> str:
     """Publish the rendering to the branch of ref; what was done, as one line."""
     branch = branch_of(ref)
     must(git(root, "config", "user.name", BOT_NAME))
     must(git(root, "config", "user.email", BOT_EMAIL))
     plugin_json = root / "plugins" / slug / ".claude-plugin" / "plugin.json"
     for attempt in range(1, ATTEMPTS + 1):
-        render_into(root, name, slug)
+        render_into(root, name, slug, repository_name)
         must(git(root, "add", "--all", "--", ENTRYPOINT, f"plugins/{slug}", CATALOG))
         if git(root, "diff", "--cached", "--quiet").returncode == 0:
             return f"the rendering of {slug} is unchanged; nothing to publish"
@@ -77,12 +80,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--name", required=True, help="the company's name as people write it")
-    parser.add_argument("--slug", default="", help="the <slug> of the repository name company-<slug>")
-    parser.add_argument("--repository", default="", help="owner/company-<slug>, read when --slug is empty")
+    parser.add_argument("--slug", default="", help="the company slug for ~/.instrukt/companies/<slug>/ and plugins/<slug>/")
+    parser.add_argument(
+        "--repository",
+        default="",
+        help="owner/repo; names the repository in the passage and defaults --slug from company-<slug> when --slug is empty",
+    )
     parser.add_argument("--ref", required=True, help="the ref the workflow runs for, such as refs/heads/main")
     args = parser.parse_args()
     try:
-        print(publish(args.root.resolve(), args.name, resolve_slug(args.slug, args.repository), args.ref))
+        slug = resolve_slug(args.slug, args.repository)
+        repository_name = resolve_repository_name(slug, args.repository)
+        print(publish(args.root.resolve(), args.name, slug, args.ref, repository_name))
     except (RenderError, PublishError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
