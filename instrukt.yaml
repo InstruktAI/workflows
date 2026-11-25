@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=.instrukt/schemas/instrukt.schema.json
+schema_version: 6
+project: workflows
+github:
+  repository: InstruktAI/workflows
+modules:
+  events: true
+  todos: true
